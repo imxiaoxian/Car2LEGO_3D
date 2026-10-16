@@ -489,7 +489,10 @@ def test_image_entrypoint_publishes_geometry_and_detail_evidence(upstream, monke
 def test_image_entrypoint_preserves_png_identity_bytes_and_accepts_own_anchor(tmp_path, monkeypatch):
     from car2lego3d import gpt_reference
 
-    source, _ = configuration()
+    source = tmp_path / "provider"
+    upstream = source / "backend/app/services/reference_images.py"
+    upstream.parent.mkdir(parents=True)
+    upstream.write_text("# Provider fixture; subprocess execution is mocked.\n", encoding="utf-8")
     output = tmp_path / "images"
     output.mkdir()
     anchor = output / "identity-anchor.png"
