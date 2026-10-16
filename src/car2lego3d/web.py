@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from .common import ROOT, write_json
+from .project import PROJECT_NAME, FRONTEND_PORT, API_PORT, LEGACY_WEB_PORT
 from .requirements import SCALES, plan_design, requirements_for_scale
 from .research import ResearchStore
 from .vehicle import load_spec
@@ -215,7 +216,7 @@ class Handler(SimpleHTTPRequestHandler):
     def local_host(self):
         ports = {str(self.server.server_port)}
         if self.desktop:
-            ports.add(os.environ.get("CAR2LEGO_FRONTEND_PORT", "8766"))
+            ports.add(os.environ.get("CAR2LEGO_FRONTEND_PORT", str(FRONTEND_PORT)))
         return self.headers.get("Host") in {f"{host}:{port}" for host in ("localhost", "127.0.0.1") for port in ports}
 
     def research(self):
@@ -277,7 +278,7 @@ class Handler(SimpleHTTPRequestHandler):
         origin = self.headers.get("Origin")
         ports = {str(self.server.server_port)}
         if self.desktop:
-            ports.add(os.environ.get("CAR2LEGO_FRONTEND_PORT", "8766"))
+            ports.add(os.environ.get("CAR2LEGO_FRONTEND_PORT", str(FRONTEND_PORT)))
         if not self.local_host() or origin not in {f"http://{host}:{port}" for host in ("localhost", "127.0.0.1") for port in ports}:
             return self.json_response({"error": "仅接受同源本机请求。"}, 403)
         if urlsplit(self.path).path.startswith("/api/v1/") and self.desktop:
@@ -318,7 +319,7 @@ class Handler(SimpleHTTPRequestHandler):
             self.json_response({"error": str(error)}, 409)
 
 
-def serve(port=8765):
+def serve(port=LEGACY_WEB_PORT):
     frontend = ROOT / "frontend/dist"
     if not (frontend / "index.html").is_file():
         raise RuntimeError("Build the page first: cd frontend; npm ci; npm run build")
@@ -326,7 +327,7 @@ def serve(port=8765):
     jobs = JobStore(ROOT / "runs/web", research)
     handler = partial(Handler, directory=str(frontend), jobs=jobs)
     with ThreadingHTTPServer(("127.0.0.1", port), handler) as server:
-        print(f"Car2LEGO_3D: http://127.0.0.1:{server.server_port}", flush=True)
+        print(f"{PROJECT_NAME}: http://127.0.0.1:{server.server_port}", flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:
@@ -337,14 +338,14 @@ def serve(port=8765):
             research.close()
 
 
-def serve_desktop(port=8767):
+def serve_desktop(port=API_PORT):
     from .desktop import DesktopStore
     research = ResearchStore(ROOT / "runs/vehicle-research")
     jobs = JobStore(ROOT / "runs/web", research)
     desktop = DesktopStore(jobs)
     handler = partial(Handler, directory=str(ROOT / "frontend/public"), jobs=jobs, desktop=desktop)
     with ThreadingHTTPServer(("127.0.0.1", port), handler) as server:
-        print(f"Car2LEGO_3D API: http://127.0.0.1:{port}", flush=True)
+        print(f"{PROJECT_NAME} API: http://127.0.0.1:{port}", flush=True)
         try:
             server.serve_forever()
         finally:

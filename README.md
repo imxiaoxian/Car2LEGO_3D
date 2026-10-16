@@ -1,7 +1,9 @@
 # Car2LEGO_3D
 
+本仓库是 **开源多视图重建方案**，默认建模后端为 Hunyuan3D-2mv。大模型 + Blender 方案独立维护在 [Car2LGEO_3D_LLM](https://github.com/imxiaoxian/Car2LGEO_3D_LLM)。目录、端口、环境与历史保留规则见 [项目隔离](docs/project-isolation.md)。
+
 独立探索 **生图 → 图片重建 3D → 物理规格校准 → 乐高模型 → Studio .io** 的本地研究项目。
-从 [Car2LEGO](https://github.com/imxiaoxian/Car2LEGO) 的图片参考、真实零件和独立验收设计出发，将显式 3D 网格作为新的中间表示。
+从原 Car2LEGO 的图片参考、真实零件和独立验收设计出发，将显式 3D 网格作为新的中间表示。原项目历史保留于配套仓库的 `archive/car2lego-local-before-llm-migration-20261016` 分支。
 
 ```text
 车型 + 大模型尺寸回答 + 外观参考 → 复用 Car2LEGO GPT 生图服务

@@ -12,8 +12,9 @@ jobs:
       - run: uv venv .venv
       - run: uv pip install --python .venv/bin/python torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cpu
       - run: uv pip install --python .venv/bin/python -r requirements.lock.txt
-      - run: uv pip install --python .venv/bin/python -e . --no-deps
-      - run: .venv/bin/python -m car2lego3d setup
+      - run: uv pip install --python .venv/bin/python -e ".[gpt]" -c requirements.lock.txt
+      - run: .venv/bin/python -m car2lego3d setup --backend hunyuan-mv
+      - run: .venv/bin/python -m car2lego3d setup --backend triposr
       - run: .venv/bin/python -m pytest -q
       - run: .venv/bin/python scripts/verify_examples.py
   frontend:

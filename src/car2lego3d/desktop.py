@@ -27,6 +27,7 @@ from .requirements import SCALES, VISUAL_SIZE_HINT, plan_design, requirements_fo
 from .vehicle import tyre_diameter
 from .config import VERSION, options
 from .checkpoints import output_snapshot, stage_signature
+from .project import desktop_backend
 
 
 def read(path, fallback=None):
@@ -260,6 +261,9 @@ class DesktopStore:
                 raise ValueError("当前比例尚无可用装配配方：" + " ".join(plan["generation"]["blockers"]))
             spec_args = ["--vehicle-specs", str(spec_path)]
             prefix = [sys.executable, "-u", "-m", "car2lego3d"]
+            backend = desktop_backend(request.get("reconstruction_backend"))
+            request["reconstruction_backend"] = backend
+            write_json(directory / "request.json", request)
             views, mesh, lego, studio = (artifacts / n for n in ("01-image", "02-mesh", "03-lego", "04-studio"))
             prompt = f"{request['brand']} {request['model']} {request.get('year') or ''}. Selected configuration: {spec['variant']}. {request.get('custom_request', '')}"
             if request.get("color") is not None:
@@ -268,7 +272,7 @@ class DesktopStore:
                 ("reference_images", 12, views / "views.json", [*prefix, "image", "--prompt", prompt,
                     "--output", views, *spec_args, *(["--reference-image", source] if source.exists() else [])]),
                 ("reconstruction", 45, mesh / "calibrated.glb", [*prefix, "reconstruct", "--views", views / "views.json",
-                    "--output", mesh, "--backend", "hunyuan-mv", "--resolution", "256", "--reconstruction-steps", "50", *spec_args]),
+                    "--output", mesh, "--backend", backend, "--resolution", "256", "--reconstruction-steps", "50", *spec_args]),
                 ("assembly", 75, lego / "model.ldr", [*prefix, "lego", "--mesh", mesh / "calibrated.glb",
                     "--output", lego, *(["--scale", request["scale"]] if request.get("scale") in SCALES else []),
                     "--reference-views", views / "views.json", *spec_args,

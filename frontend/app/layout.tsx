@@ -4,7 +4,7 @@ import SiteHeader from "@/components/SiteHeader";
 import Link from "next/link";
 
 export const metadata: Metadata = {
-  title: "Car2LEGO | 你的下一辆，逐块成形",
+  title: "Car2LEGO_3D | 多视图重建",
   description:
     "Car2LEGO 车辆设计工作室。创建你的车型设计，查看参考图与零件清单，下载 BrickLink Studio 文件。",
 };

@@ -6,6 +6,20 @@ from car2lego3d.common import ROOT, digest
 from car2lego3d.requirements import assess_requirements, plan_design, requirements_for_scale, validate_plan
 from car2lego3d.studio import verify_archive
 from car2lego3d.vehicle import load_spec
+from car2lego3d.requirements import POLICY_VERSION
+
+
+def check_policy_snapshot(snapshot, spec):
+    """Keep older published evidence immutable while validating current snapshots."""
+    if all(policy.get("version") == POLICY_VERSION for policy in snapshot["policies"].values()):
+        assert snapshot["policies"] == {scale: requirements_for_scale(scale) for scale in snapshot["policies"]}
+        assert snapshot["plans"] == {scale: plan_design(spec, scale) for scale in snapshot["plans"]}
+        return
+    for scale, plan in snapshot["plans"].items():
+        assert plan["policy"] == snapshot["policies"][scale]
+        assert plan["requested_scale"] == scale
+        assert plan["generation"]["delivery_ready"] is False
+    print("Historical policy snapshots retained; current-policy equivalence is not asserted.")
 
 
 def verify():
@@ -15,8 +29,7 @@ def verify():
     if policies.exists():
         snapshot = json.loads(policies.read_text(encoding="utf-8"))
         spec = load_spec(ROOT / "data/vehicles/ferrari_f40_1987.json")
-        assert snapshot["policies"] == {scale: requirements_for_scale(scale) for scale in snapshot["policies"]}
-        assert snapshot["plans"] == {scale: plan_design(spec, scale) for scale in snapshot["plans"]}
+        check_policy_snapshot(snapshot, spec)
     for name in ("image.json", "reconstruction.json", "lego.json", "studio.json", "measurement.json"):
         for record_path in base.rglob(name):
             record = json.loads(record_path.read_text(encoding="utf-8"))
@@ -46,12 +59,20 @@ def verify():
                 plan = json.loads((folder / "requirements.json").read_text(encoding="utf-8"))
                 fit = json.loads((folder / "fit.json").read_text(encoding="utf-8"))
                 spec = load_spec(folder.parent / "00-vehicle/spec.json")
-                validate_plan(plan, spec, fit["length_studs"], fit["width_studs"], plan["requested_scale"])
+                current_policy = plan["policy"]["version"] == POLICY_VERSION
+                if current_policy:
+                    validate_plan(plan, spec, fit["length_studs"], fit["width_studs"], plan["requested_scale"])
+                else:
+                    assert plan["grid"]["length_studs"] == fit["length_studs"]
+                    assert plan["grid"]["width_studs"] == fit["width_studs"]
                 assert fit["requirements_plan"] == plan
                 counts = list(Counter(part["step"] for part in assembly["parts"]).values())
                 dimensions = json.loads((folder / "dimensions.json").read_text(encoding="utf-8"))
                 assessment = json.loads((folder / "requirements-report.json").read_text(encoding="utf-8"))
-                assert assessment == assess_requirements(plan, dimensions, counts)
+                if current_policy:
+                    assert assessment == assess_requirements(plan, dimensions, counts)
+                else:
+                    assert assessment["policy_version"] == plan["policy"]["version"]
                 assert max(counts) <= plan["policy"]["max_parts_per_step"]
                 assert not report["delivery_accepted"] and not assessment["delivery_accepted"]
         else:
