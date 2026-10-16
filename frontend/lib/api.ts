@@ -54,6 +54,8 @@ export interface Design {
 
 export interface PhysicalSpecifications {
   version: string;
+  acquisition_mode?: "llm_dialogue" | "sourced";
+  selected_variant?: string;
   vehicle: { make: string; model: string; year: number | null };
   scale: string;
   applied_to_design?: boolean;
@@ -70,7 +72,8 @@ export interface PhysicalSpecifications {
   missing_recommended?: string[];
   conflicts: { name: string }[];
   sources: { url: string; status: string; title?: string; error?: string; note?: string; measurement_count?: number }[];
-  research?: { skill: string; version: string; status: string; scale: string; documents_read?: number;
+  research?: { skill: string; version: string; status: string; scale?: string; documents_read?: number;
+    mode?: string; model?: string; dialogue_count?: number;
     started_at?: string; finished_at?: string; missing_fields?: string[];
     queries: { query: string; purpose: string; status: string; engine?: string; results: { title: string; url: string }[] }[] };
 }
@@ -147,7 +150,7 @@ export async function createDesign(
   model: string,
   year?: number | null,
   image_url?: string,
-  scale: string = "1:38"
+  scale: string = "auto"
 ): Promise<DesignDetail> {
   return fetchApi<DesignDetail>("/designs", {
     method: "POST",
@@ -160,7 +163,7 @@ export async function createDesignFromImage(
 ): Promise<DesignDetail> {
   const form = new FormData();
   form.append("image", image);
-  form.append("scale", overrides.scale || "1:38");
+  form.append("scale", overrides.scale || "auto");
   if (overrides.make) form.append("make", overrides.make);
   if (overrides.model) form.append("model", overrides.model);
   if (overrides.year) form.append("year", String(overrides.year));

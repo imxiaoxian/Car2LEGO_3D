@@ -100,3 +100,34 @@ def test_cache_rejects_tampered_mesh_and_changed_view_inputs(tmp_path):
     with pytest.raises(ValueError, match="settings"):
         reuse_reconstruction(cache, tmp_path / "out", path, None, 128, 50, 42)
     assert not (tmp_path / "out").exists()
+
+
+def test_cache_reuses_same_cameras_with_new_metadata_and_details(tmp_path):
+    from car2lego3d.common import model_lock
+    from car2lego3d.multiview import reuse_reconstruction
+    path = view_set(tmp_path)
+    manifest, _ = load_views(path)
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    for name in ("mesh.glb", "mesh.obj"):
+        (cache / name).write_bytes(b"recorded mesh fixture")
+    write_json(cache / "reconstruction.json", {
+        "status": "completed", "inputs": {"backend": "hunyuan-mv", "views": manifest["views"],
+            "resolution": 256, "steps": 50, "seed": 42}, "models": model_lock(),
+        "outputs": {name: digest(cache / name) for name in ("mesh.glb", "mesh.obj")}})
+    for name, item in manifest["views"].items():
+        item.update(modules=["glazing"], purpose="New appearance evidence")
+        renamed = tmp_path / (name + "-renamed.png")
+        renamed.write_bytes((tmp_path / item["file"]).read_bytes())
+        item["file"] = renamed.name
+    manifest["details"] = {"cockpit": {"file": "cockpit.png", "sha256": "new evidence"}}
+    write_json(path, manifest)
+    reuse_reconstruction(cache, tmp_path / "out", path, None, 256, 50, 42)
+    assert (tmp_path / "out/mesh.glb").read_bytes() == (cache / "mesh.glb").read_bytes()
+    # Changed camera pixels still invalidate the reconstruction, even if metadata agrees.
+    image = tmp_path / manifest["views"]["front"]["file"]
+    Image.new("RGB", (256, 256), "white").save(image)
+    manifest["views"]["front"]["sha256"] = digest(image)
+    write_json(path, manifest)
+    with pytest.raises(ValueError, match="settings"):
+        reuse_reconstruction(cache, tmp_path / "changed", path, None, 256, 50, 42)

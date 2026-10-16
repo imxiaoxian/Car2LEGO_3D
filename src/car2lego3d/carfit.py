@@ -3,6 +3,7 @@
 This is a constrained vehicle approximation, not arbitrary mesh-to-brick recovery.
 """
 import csv
+import json
 from collections import Counter
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -40,7 +41,7 @@ class Placement:
 
 
 def fit_mesh(mesh, length=None, up_axis="z", yaw=0, color=None, specifications=None, width=None,
-             scale=None, requirements_plan=None, body_style=None, reference_brief=None):
+             scale=None, requirements_plan=None, body_style=None, reference_brief=None, layout_observations=None):
     plan = None
     if specifications is not None:
         from .requirements import plan_design, validate_plan
@@ -59,10 +60,16 @@ def fit_mesh(mesh, length=None, up_axis="z", yaw=0, color=None, specifications=N
     elif scale is not None or requirements_plan is not None:
         raise ValueError("Scale requirements need sourced vehicle specifications.")
     length = 24 if length is None else length
+    from .wedge import LENGTH_RANGE, supports
+    recipe_range = LENGTH_RANGE if supports(specifications) else RECIPE_LENGTH_RANGE
+    nominal_grid = dict(length_studs=length, width_studs=width)
+    if plan and plan["generation"]["config"]["proportion_mode"] == "visual":
+        length = max(recipe_range[0], min(recipe_range[1], length))
+        width = min(RECIPE_WIDTHS, key=lambda value: abs(value-width))
     if (isinstance(length, bool) or not isinstance(length, int)
-            or not RECIPE_LENGTH_RANGE[0] <= length <= RECIPE_LENGTH_RANGE[1]):
-        raise ValueError(f"The sports-car part family currently supports {RECIPE_LENGTH_RANGE[0]}.."
-                         f"{RECIPE_LENGTH_RANGE[1]} integer studs.")
+            or not recipe_range[0] <= length <= recipe_range[1]):
+        raise ValueError(f"The vehicle part family currently supports {recipe_range[0]}.."
+                         f"{recipe_range[1]} integer studs.")
     color_override = color is not None
     mesh, alignment = orient(mesh, up_axis, yaw)
     if mesh.extents[0] < 1e-8 or mesh.extents[2] < 1e-8:
@@ -108,10 +115,11 @@ def fit_mesh(mesh, length=None, up_axis="z", yaw=0, color=None, specifications=N
         axles.append(float(lo + np.argmax(histogram[lo:hi]) + .5))
     mesh_axles = axles.copy()
     axle_source = "mesh wheel hypotheses"
+    effective_denominator = specifications["measurements"]["length"]["value"]/(length*8) if specifications else None
     if specifications is not None:
         from .vehicle import constrained_axles
         axles, axle_source = constrained_axles(specifications, length, mesh_axles,
-                                               plan["target_scale_denominator"])
+                                               effective_denominator)
     chroma = rgb.max(axis=1) - rgb.min(axis=1)
     paint = np.median(rgb[chroma > 35], axis=0) if np.any(chroma > 35) else rgb.mean(axis=0)
     if color is None:
@@ -125,6 +133,7 @@ def fit_mesh(mesh, length=None, up_axis="z", yaw=0, color=None, specifications=N
     upper_width = float(np.diff(np.quantile(upper, [.02, .98]))[0]) if len(upper) >= 20 else None
     upper_ratio = upper_width / mesh.extents[1] * mesh.extents[0] / (length-1) if upper_width is not None else None
     fit = {"length_studs": length, "width_studs": width, "body_color": color,
+            "nominal_grid": nominal_grid, "proportion_mode": "visual" if plan else "nominal",
             "body_color_source": "override" if color_override else "mesh chroma",
             "axles_studs": axles, "roof_start_stud": roof_start, "roof_end_stud": roof_end,
             "source_axles_studs": mesh_axles, "axle_position_source": axle_source,
@@ -144,10 +153,20 @@ def fit_mesh(mesh, length=None, up_axis="z", yaw=0, color=None, specifications=N
     if calibration is not None:
         from .vehicle import dimension_report
         fit["physical_calibration"] = calibration
-        fit["target_scale_denominator"] = plan["target_scale_denominator"]
+        fit["nominal_scale_denominator"] = plan["target_scale_denominator"]
+        fit["target_scale_denominator"] = effective_denominator
         fit["requirements_plan"] = plan
+        fit["effective_scale_denominator"] = measurement_scale = effective_denominator
+        fit["visual_grid_adjustments"] = dict(requested=nominal_grid, selected=dict(length_studs=length, width_studs=width),
+            dimension_gate="advisory", effective_scale_denominator=measurement_scale)
+        if layout_observations is not None:
+            fit["layout_observations"] = layout_observations
         from .recipes import fit_family
         fit_family(fit, specifications, reference_brief, body_style)
+        if fit.get("body_family") in ("suv", "crossover"):
+            from .sectional import lateral_sections
+            fit["mesh_sections"] = lateral_sections(points, vertices.max(axis=0), length, width,
+                                                     fit["roof_top_plates"])
         fit["physical_constraints"] = dimension_report(specifications, fit)
         if "axle positions" in fit["inferred_parameters"]:
             fit["inferred_parameters"].remove("axle positions")
@@ -179,22 +198,34 @@ class Car:
                     self.cells.pop((x, y, z), None)
 
     def pack(self):
+        from .details import prepare_structure
+        prepare_structure(self)
+        if self.fit.get("detail_surface_mode") == "envelope" or self.fit.get("native_geometry_required"):
+            from .reservation import reserve
+            reserve(self)
         candidates = [(part, w, d, h, rotate) for catalog, h in ((BRICKS, 3), (PLATES, 1))
                       for part, (w0, d0) in catalog.items()
                       for w, d, rotate in ([(w0, d0, False)] if w0 == d0 else
                                           [(w0, d0, False), (d0, w0, True)])]
         owners = {}
-        for x, y, z in sorted(self.cells, key=lambda p: (p[2], p[1], p[0])):
+        for x, y, z in sorted(self.cells, key=lambda p: (p[2], p[1], -p[0] if (p[2]//3)%2 else p[0])):
             if (x, y, z) in owners:
                 continue
             color = self.cells[x, y, z]
+            direction = -1 if (z//3)%2 else 1
             choices = []
             for part, w, d, h, rotate in candidates:
-                points = [(x+dx, y+dy, z+dz) for dx in range(w) for dy in range(d) for dz in range(h)]
+                if (self.fit.get("detail_surface_mode") == "envelope" or self.fit.get("native_geometry_required")) and z < 5 and h != 1:
+                    continue
+                points = [(x+direction*dx, y+dy, z+dz) for dx in range(w) for dy in range(d) for dz in range(h)]
                 if all(p not in owners and self.cells.get(p) == color for p in points):
-                    choices.append((w*d*h, w*d, part, w, d, h, rotate, points))
-            _, _, part, w, d, h, rotate, points = max(choices)
-            self.place(part, color, x+(w-1)/2, y+(d-1)/2, z+h, "body and chassis", z+1,
+                    lower = {owners[(px,py,z-1)] for px,py,pz in points if pz==z and (px,py,z-1) in owners}
+                    bridge = max(0,len(lower)-1)
+                    orientation = d if z%2 else w
+                    attachment = 24 if lower and z > 4 else 0
+                    choices.append((w*d*h+12*bridge+attachment, w*d, orientation, part, w, d, h, rotate, points))
+            _, _, _, part, w, d, h, rotate, points = max(choices)
+            self.place(part, color, x+direction*(w-1)/2, y+(d-1)/2, z+h, "body and chassis", z+1,
                        QUARTER if rotate else IDENTITY)
             for point in points:
                 owners[point] = len(self.parts)-1
@@ -219,6 +250,12 @@ class Car:
 
 
 def design(fit, rear_wing=True):
+    if fit.get("family_builder") == "wedge":
+        from .wedge import design_wedge
+        return design_wedge(fit, rear_wing)
+    if fit.get("appearance_envelope") and fit.get("body_family") in ("suv", "crossover"):
+        from .envelope_suv import design_envelope_suv
+        return design_envelope_suv(fit)
     if fit.get("body_family") in ("suv", "crossover"):
         from .sculpted_suv import design_sculpted_suv
         return design_sculpted_suv(fit)
@@ -396,7 +433,8 @@ def split_steps(car, limit):
 
 def convert_car(source, directory, length_studs=None, up_axis="z", yaw=0, color=None, rear_wing=True,
                 vehicle_spec=None, width_studs=None, scale=None, requirements_plan=None,
-                body_style=None, reference_views=None):
+                body_style=None, reference_views=None, layout_observations=None, generation_config=None,
+                style_reference=None):
     source, directory = Path(source), Path(directory)
     with stage(directory, "lego", {"mesh": source.name, "sha256": digest(source), "strategy": "car",
                                    "length_studs": length_studs, "rear_wing": rear_wing,
@@ -413,9 +451,32 @@ def convert_car(source, directory, length_studs=None, up_axis="z", yaw=0, color=
             manifest, _ = load_views(reference_views)
             brief = manifest.get("brief")
             record["reference_views_sha256"] = digest(reference_views)
+            from .wedge import supports
+            if supports(specifications):
+                from .layout import observe_layout, validate_layout
+                if layout_observations is None:
+                    layout_observations = observe_layout(reference_views, directory / "layout")
+                else:
+                    layout_observations = validate_layout(json.loads(Path(layout_observations).read_text(encoding="utf-8")), reference_views)
+                    write_json(directory / "layout/layout.json", layout_observations)
         fit = fit_mesh(mesh, length_studs, up_axis, yaw, color, specifications, width_studs, scale,
-                       requirements_plan, body_style, brief)
+                       requirements_plan, body_style, brief, layout_observations)
+        if reference_views:
+            from .details import extract_features
+            fit["detail_program"] = extract_features(reference_views, directory / "features")
+            if fit.get("body_family") in ("suv", "crossover"):
+                from .appearance import measure
+                fit["appearance_envelope"] = measure(reference_views, fit, directory / "appearance")
+        from .config import options
+        from .target import build_target, project_features, save_target
+        fit["generation_config"] = options(generation_config)
+        target = build_target(specifications, fit, source, reference_views, style_reference, generation_config)
+        target = project_features(orient(mesh, up_axis, yaw)[0], fit.get("detail_program"), target,
+                                  fit.get("front_orientation_flipped", False))
+        save_target(directory, target)
         car = design(fit, rear_wing)
+        from .details import finish_structure, retention_report
+        finish_structure(car)
         requirements_report = None
         if specifications is not None:
             from .requirements import assess_requirements
@@ -426,6 +487,34 @@ def convert_car(source, directory, length_studs=None, up_axis="z", yaw=0, color=
             write_json(directory / "requirements.json", plan)
             write_json(directory / "requirements-report.json", requirements_report)
         export(car, directory)
+        native_audit = None
+        if fit.get("detail_surface_mode") == "envelope" or fit.get("native_geometry_required"):
+            from .reservation import audit_assembly
+            native_audit = audit_assembly(directory)
+            from .sequence import resequence
+            limit = fit.get("requirements_plan", {}).get("policy", {}).get("max_parts_per_step", 12)
+            sequence = resequence(car, native_audit, limit)
+            export(car, directory)
+            native_audit = audit_assembly(directory)
+            sequence["assembly_sha256"] = digest(directory / "assembly.json")
+            write_json(directory / "build-sequence.json", sequence)
+            if fit.get("family_builder") == "wedge":
+                from .wedge import junction_report
+                junctions = junction_report(car, native_audit)
+                junctions["assembly_sha256"] = digest(directory / "assembly.json")
+                write_json(directory / "junction-report.json", junctions)
+                if junctions["status"] != "passed":
+                    raise RuntimeError("Cabin interface attachments failed; inspect junction-report.json")
+            if specifications is not None:
+                requirements_report = assess_requirements(plan, fit["physical_constraints"],
+                    list(Counter(p.step for p in car.parts).values()))
+                write_json(directory / "requirements-report.json", requirements_report)
+        details = retention_report(car)
+        if details:
+            details["assembly_sha256"] = digest(directory / "assembly.json")
+            details["features_sha256"] = digest(directory / "features/features.json")
+            details["source_mesh_sha256"] = digest(source)
+            write_json(directory / "detail-report.json", details)
         write_json(directory / "fit.json", fit)
         if fit.get("recipe_selection"):
             write_json(directory / "recipe-selection.json", fit["recipe_selection"])
@@ -436,11 +525,15 @@ def convert_car(source, directory, length_studs=None, up_axis="z", yaw=0, color=
                   "standard_part_scaling": False, "body_cells_exact": True,
                   "buildability": "unverified", "studio_verified": False, "physical_verified": False,
                   "appearance_accepted": False,
+                  "detail_preservation": details["status"] if details else "not_evaluated",
+                  "native_geometry_status": "passed" if native_audit else "not_evaluated",
+                  "unresolved_features": details["unresolved_count"] if details else None,
                   "scale_requirements_status": "draft" if requirements_report else "not_evaluated_missing_vehicle_specs",
                   "delivery_accepted": False,
-                  "limitations": ["Vehicle part-family prior approximates mesh; exact coverage is not a goal.",
-                                  "No native collision, clutch or physical assembly verification.",
-                                  "No decals, working doors, steering or verified model-specific detail recovery."]}
+                  "limitations": ["Mesh proportions and observed feature polygons are quantized to native part families.",
+                                  "Native geometry is checked separately; clutch and physical assembly remain unverified.",
+                                  "Unresolved details are reported; appearance fidelity requires rendered review.",
+                                  "No decals, working doors or steering verification."]}
         write_json(directory / "validation.json", report)
         if specifications is not None:
             write_json(directory / "dimensions.json", fit["physical_constraints"])
@@ -450,6 +543,8 @@ def convert_car(source, directory, length_studs=None, up_axis="z", yaw=0, color=
             record["outputs"]["dimensions.json"] = digest(directory / "dimensions.json")
             record["outputs"].update({name: digest(directory / name) for name in
                                       ("requirements.json", "requirements-report.json")})
+        if details:
+            record["outputs"]["detail-report.json"] = digest(directory / "detail-report.json")
         from .preview import render
         render(orient(mesh, up_axis, yaw)[0], directory / "mesh-preview.png")
     return directory / "model.ldr"

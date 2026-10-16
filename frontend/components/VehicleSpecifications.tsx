@@ -34,7 +34,8 @@ function VehicleSpecificationsView({ car, scale, data, requirements }: Props) {
   const specs = collected || data;
   const measurements = Object.entries(specs?.measurements || {});
   const required = requirements?.required_measurements || specs?.required_measurements;
-  const research = specs?.research?.skill ? specs.research : undefined;
+  const research = specs?.research;
+  const dialogue = specs?.acquisition_mode === "llm_dialogue";
   const queries = research?.queries || [];
   const found = measurements.filter(([, m]) => m.grounded).length;
   const vehicleName = [car.year, car.make, car.model].filter(Boolean).join(" ");
@@ -42,30 +43,31 @@ function VehicleSpecificationsView({ car, scale, data, requirements }: Props) {
   async function collect() {
     setBusy(true); setError("");
     try { setCollected({ ...await collectVehicleSpecifications(car.make, car.model, car.year, scale), applied_to_design: false }); }
-    catch (err) { setError(err instanceof Error ? err.message : "车型资料搜索失败"); }
+    catch (err) { setError(err instanceof Error ? err.message : "车型资料获取失败"); }
     finally { setBusy(false); }
   }
 
-  return <section className="physical-specifications" aria-label="原厂尺寸与结构资料">
-    <div className="section-heading"><h2>原厂尺寸与结构资料</h2><div className="physical-spec-actions">
-      <span className="secondary">{busy ? "正在搜索车型资料" : specs?.applied_to_design ? "已用于装配规划" : collected ? "新检索资料" : "车型资料"}</span>
-      <button type="button" className="icon-button" title="搜索车型尺寸与结构资料" aria-label="搜索车型尺寸与结构资料" disabled={busy} onClick={() => void collect()}>
+  return <section className="physical-specifications" aria-label="车型尺寸与结构资料">
+    <div className="section-heading"><h2>车型尺寸与结构资料</h2><div className="physical-spec-actions">
+      <span className="secondary">{busy ? "正在获取车型资料" : specs?.applied_to_design ? "已用于装配规划" : collected ? "新获取资料" : "车型资料"}</span>
+      <button type="button" className="icon-button" title="向大模型获取车型尺寸与结构资料" aria-label="向大模型获取车型尺寸与结构资料" disabled={busy} onClick={() => void collect()}>
         {busy ? <LoaderCircle size={18} className="spin" /> : <Search size={18} />}
       </button></div></div>
-    <p className="secondary physical-research-summary" role="status">{busy ? `${vehicleName} · 检索中` :
-      research ? `${research.status === "unavailable" ? "搜索服务暂不可用" : research.status === "searching" ? "车型检索中" : "车型检索完成"} · ${queries.filter(query => query.status === "searched").length} 组搜索 · ${research.documents_read || 0} 份原文 · ${found} 项尺寸` :
+    <p className="secondary physical-research-summary" role="status">{busy ? `${vehicleName} · 大模型对话中` : dialogue ? `大模型提供 · ${measurements.length} 项尺寸 · 未经原厂资料核实` :
+      research?.skill ? `${research.status === "unavailable" ? "搜索服务暂不可用" : research.status === "searching" ? "车型检索中" : "车型检索完成"} · ${queries.filter(query => query.status === "searched").length} 组搜索 · ${research.documents_read || 0} 份原文 · ${found} 项尺寸` :
       `${vehicleName} · ${found} 项有来源的尺寸`}</p>
+    {specs?.selected_variant && <p className="secondary">适用版本：{specs.selected_variant}</p>}
     {specs?.generation_status === "ambiguous" && <p className="error-message" role="status">资料涉及不同世代，尺寸暂不用于精确约束。可补充年款或世代以限定车型。</p>}
     {car.year == null && specs?.generation_status === "source_scoped" && <p className="secondary">资料适用年款：{specs.source_year_ranges?.map(range => `${range.start}–${range.end}`).join("、")}</p>}
     {error && <p className="error-message" role="alert">{error}</p>}
     {measurements.length > 0 ? <div className="parts-table-wrap"><table className="parts-table physical-spec-table">
-      <thead><tr><th>项目</th><th>规划用途</th><th>实车</th><th>{scale} 目标</th><th>资料状态</th><th>来源</th></tr></thead>
+      <thead><tr><th>项目</th><th>规划用途</th><th>实车</th><th>模型参考</th><th>资料状态</th><th>来源</th></tr></thead>
       <tbody>{measurements.map(([name, m]) => <tr key={name}><td>{names[name] || name}</td>
-        <td>{required?.includes(name) ? "比例与结构" : "细节参考"}</td>
+        <td>{required?.includes(name) ? "结构参考" : "细节参考"}</td>
         <td>{m.value.toLocaleString(undefined, { maximumFractionDigits: 2 })} {m.unit === "deg" ? "°" : m.unit}</td>
-        <td>{m.unit === "deg" ? `${m.value}°` : m.target_model_mm == null ? "待换算" : `${m.target_model_mm.toFixed(2)} mm`}</td>
-        <td>{m.conflicted ? "多来源差异" : m.method === "estimated" ? "估算" : m.grounded ? m.method === "derived" ? "规格换算" : "原文数据" : "适用版本待确认"}</td>
-        <td>{m.source_url ? <a className="text-link" href={m.source_url} target="_blank" rel="noreferrer" title={m.evidence}>资料<ExternalLink size={12} /></a> : "缺少来源"}</td>
+        <td>{m.unit === "deg" ? `${m.value}°` : scale === "auto" ? "按零件选型" : m.target_model_mm == null ? "待换算" : `${m.target_model_mm.toFixed(2)} mm`}</td>
+        <td>{dialogue ? m.method === "derived" ? "回答换算" : "大模型提供" : m.conflicted ? "多来源差异" : m.method === "estimated" ? "估算" : m.grounded ? m.method === "derived" ? "规格换算" : "原文数据" : "适用版本待确认"}</td>
+        <td>{dialogue ? <span title={m.evidence}>模型回答</span> : m.source_url ? <a className="text-link" href={m.source_url} target="_blank" rel="noreferrer" title={m.evidence}>资料<ExternalLink size={12} /></a> : "缺少来源"}</td>
       </tr>)}</tbody></table></div> : <p className="secondary">尚无可用的尺寸资料</p>}
     {!!specs?.conflicts.length && <p className="error-message">{specs.conflicts.length} 项资料存在数值冲突，未作为精确尺寸约束。</p>}
     {!!specs?.missing.length && <details className="quality-issues"><summary>尚未找到的尺寸 · {specs.missing.length} 项</summary>

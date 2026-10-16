@@ -5,6 +5,7 @@ from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from PIL import Image
+import numpy as np
 
 from .common import digest, stage
 
@@ -26,6 +27,9 @@ def assembly_sequence(text):
             int(tokens[1])
             if not all(math.isfinite(float(value)) for value in tokens[2:14]):
                 raise ValueError("Non-finite LDraw transform.")
+            rotation = np.array(tokens[5:14], dtype=float).reshape(3, 3)
+            if not np.allclose(rotation.T@rotation, np.eye(3), atol=1e-5) or not np.isclose(np.linalg.det(rotation), 1):
+                raise ValueError("Studio parts must use rigid transforms, without scaling or reflection.")
             sequence.append(tuple(tokens))
         elif tokens[0] != "0":
             raise ValueError("Only comments, steps and standard part references are supported.")

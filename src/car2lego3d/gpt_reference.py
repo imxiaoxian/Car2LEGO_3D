@@ -11,6 +11,7 @@ from PIL import Image
 
 from .common import ROOT, digest, stage, write_json
 from .vehicle import load_spec, spec_record
+from .reference_plan import DETAIL_SHOTS, PRIMARY_SHOTS, SUPPLEMENTAL_SHOTS
 
 
 def configuration():
@@ -43,10 +44,18 @@ def generate(prompt, directory, vehicle_spec=None, reference_image=None):
         directory.mkdir(parents=True, exist_ok=True)
         target = directory / "identity-anchor.png"
         with Image.open(anchor) as image:
-            image.save(target, format="PNG")
+            image_format = image.format
+            if image_format != "PNG":
+                image.save(target, format="PNG")
+        # The upstream identity cache hashes file bytes, including PNG metadata.
+        if image_format == "PNG" and anchor != target:
+            shutil.copyfile(anchor, target)
         state["source_image_path"] = str(target)
     inputs = {"prompt": prompt, "provider": "Car2LEGO ReferenceImageService", "source_sha256": digest(upstream),
-              "views": ["front", "back", "left", "right"], "source_root": str(source)}
+              "scheduler_sha256": digest(ROOT / "scripts/car2lego_reference_worker.py"),
+              "views": ["front", "back", "left", "right"],
+              "supplemental_views": list(SUPPLEMENTAL_SHOTS), "details": list(DETAIL_SHOTS),
+              "source_root": str(source)}
     with stage(directory, "image", inputs) as record:
         if spec:
             record.update(vehicle_spec=spec_record(vehicle_spec), specifications=spec)
@@ -54,7 +63,9 @@ def generate(prompt, directory, vehicle_spec=None, reference_image=None):
             record["reference_image"] = {"file": "identity-anchor.png", "sha256": digest(target)}
         request = directory / "reference-request.json"
         write_json(request, state)
-        environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+        local = dotenv_values(ROOT / ".env")
+        environment = {**{k: str(local[k]) for k in ("CAR2LEGO_REFERENCE_CONCURRENCY",) if local.get(k)},
+                       **os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
         result = subprocess.run([python, "-B", str(ROOT / "scripts/car2lego_reference_worker.py"),
                                  "--source-root", str(source), "--request", str(request)],
                                 env=environment, cwd=ROOT, capture_output=True, text=True, encoding="utf-8")
@@ -70,27 +81,34 @@ def generate(prompt, directory, vehicle_spec=None, reference_image=None):
             raise ValueError("Generated reference hash mismatch.")
         output = directory / "reference.png"
         shutil.copyfile(generated, output)
-        views = {}
-        for slot, view in {"front": "front", "rear": "back", "body": "left", "wheels": "right"}.items():
+        groups = {"views": {}, "supplemental_views": {}, "details": {}}
+        for slot, view in {**PRIMARY_SHOTS, **{name: name for name in (*SUPPLEMENTAL_SHOTS, *DETAIL_SHOTS)}}.items():
             item = next(item for item in manifest["images"] if item["view"] == slot)
             origin = directory / "car2lego" / item["path"]
             if not item["model"].startswith("gpt-image-") or digest(origin) != item["sha256"]:
                 raise ValueError(f"Invalid GPT multiview provenance for {view}.")
             destination = directory / f"{view}.png"
             shutil.copyfile(origin, destination)
-            views[view] = {"file": destination.name, "sha256": digest(destination), "model": item["model"]}
+            group = "views" if slot in PRIMARY_SHOTS else "details" if slot in DETAIL_SHOTS else "supplemental_views"
+            groups[group][view] = {"file": destination.name, "sha256": digest(destination), "model": item["model"],
+                                  "purpose": item.get("purpose"), "modules": item.get("modules", []),
+                                  "identity_anchor_sha256": overview["sha256"],
+                                  "reconstruction_input": group == "views", "synthetic": True}
+        views = groups["views"]
         view_manifest = directory / "views.json"
-        write_json(view_manifest, {"schema_version": 1, "views": views,
+        write_json(view_manifest, {"schema_version": 1, "reference_schema_version": 2, **groups,
                    "camera_contract": "orthographic elevations at wheel hub height; front/back/left/right",
                    "identity_anchor": "reference.png", "brief": manifest["brief"],
-                   "synthetic": True, "cross_view_consistency_verified": False})
+                   "synthetic": True, "cross_view_consistency_verified": False,
+                   "auxiliary_camera_contract": "unregistered; semantic evidence only, never used as calibrated mesh cameras"})
         with Image.open(output) as image:
             size = list(image.size)
         record.update(model=overview["model"], output=output.name, sha256=digest(output), size=size,
                       synthetic=True, physical_proportions_guaranteed=False,
-                      generation_logic="Direct call to unmodified Car2LEGO ReferenceImageService.generate",
+                      generation_logic="Reused Car2LEGO service; overview first, sequential batches of five isolated shots with completion barriers and adaptive rate-limit retries",
+                      generation_schedule=json.loads((directory / "car2lego/service-record.json").read_text(encoding="utf-8"))["generation_schedule"],
                       appearance_accepted=False, seed_supported=False,
-                      reconstruction_input="four labelled views", views=views,
+                      reconstruction_input="four labelled views supported by Hunyuan3D-2mv", **groups,
                       outputs={"reference.png": digest(output), "views.json": digest(view_manifest),
                                "car2lego/references/manifest.json": digest(directory / "car2lego/references/manifest.json")})
     return view_manifest

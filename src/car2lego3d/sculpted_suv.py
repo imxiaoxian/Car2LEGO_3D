@@ -12,6 +12,7 @@ def design_sculpted_suv(fit):
     start,end=fit["roof_start_stud"],fit["roof_end_stud"]
     roof=fit["roof_top_plates"]
     glass=roof-3
+    fit["glass_top_plates"]=glass
     deck=glass-fit["windscreen_height_plates"]
     fit["deck_top_plates"]=deck
     cabin_width=fit["cabin_width_studs"]

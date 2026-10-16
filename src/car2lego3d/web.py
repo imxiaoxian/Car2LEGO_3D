@@ -77,8 +77,8 @@ def prepare_request(payload, research):
     identity, selected, custom = vehicle_identity(payload)
     brand, model, variant = (identity[k] for k in ("brand", "model", "variant"))
     description = text_field(payload, "description", 100, required=False)
-    scale = payload.get("scale", "1:24")
-    if scale not in (*SCALES, "custom"):
+    scale = payload.get("scale", "auto")
+    if scale not in (*SCALES, "custom", "auto"):
         raise ValueError("不支持的比例。")
     color = payload.get("color", 4)
     seed = payload.get("seed", 42)
@@ -98,7 +98,9 @@ def prepare_request(payload, research):
     spec_path = research.specification(payload.get("research_id"), identity)
     spec = load_spec(spec_path)
     request.update(research_id=payload["research_id"], resolved_model=spec["model"], resolved_variant=spec["variant"])
-    if scale != "custom":
+    if scale == "auto":
+        plan = plan_design(spec)
+    elif scale != "custom":
         plan = plan_design(spec, scale)
         arguments += ["--scale", scale]
     else:

@@ -13,4 +13,6 @@ runs/
 frontend/node_modules/
 frontend/dist/
 frontend/.next/
+frontend/.next-quality/
+frontend/.next-details/
 frontend/*.tsbuildinfo

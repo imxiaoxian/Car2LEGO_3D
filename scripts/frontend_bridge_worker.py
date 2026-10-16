@@ -20,6 +20,7 @@ def main():
     parser.add_argument("--input", type=Path)
     parser.add_argument("--request", type=Path)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--renders-only", action="store_true", help="Skip the PDF during geometry refinement")
     args = parser.parse_args()
     source, output = args.source.resolve(), args.output.resolve()
     if output.is_relative_to(source):
@@ -32,6 +33,14 @@ def main():
     os.environ["STUDIO_LDRAW_PATH"] = str(source / "Studio 2.0/ldraw")
     os.environ["NUMBA_CACHE_DIR"] = str(output.parent / "numba-cache")
     sys.path.insert(0, str(source / "backend"))
+    # Fill the upstream service's small colour subset in this isolated process.
+    from app.services.ldraw_service import LDrawService
+    color_path = source / "Studio 2.0/data/StudioColorDefinition.txt"
+    with color_path.open(encoding="utf-8-sig") as stream:
+        for row in csv.DictReader(stream, delimiter="\t"):
+            code, rgb = row["LDraw Color Code"], row["RGB value"].lstrip("#")
+            if code.isdigit() and re.fullmatch(r"[0-9a-fA-F]{6}", rgb):
+                LDrawService.COLOR_MAP[int(code)] = (row["LDraw Color Name"], "#"+rgb)
     if args.operation == "catalog":
         from app.services.vehicle_catalog import vehicle_catalog
         from app.services.mod_parts_catalog import MOD_CATALOG
@@ -68,22 +77,41 @@ def main():
         parts = [dict(id=f"p{i}", part_num=p["part"]+".dat", color_id=p["color"], module=module_ids[p["module"]],
             transform=dict(position=p["position"], rotation=p["rotation"])) for i,p in enumerate(rows)]
         steps = []
-        limit = {"1:38":12, "1:24":12, "1:16":10, "1:12":8}[request["scale"]]
+        limit = {"1:38":12, "1:24":12, "1:16":10, "1:12":8}.get(request.get("scale"), 12)
         for number in sorted({p["step"] for p in rows}):
-            for module in sorted(module_ids.values()):
+            for module in dict.fromkeys(parts[i]["module"] for i,p in enumerate(rows) if p["step"] == number):
                 ids = [p["id"] for i,p in enumerate(parts) if rows[i]["step"] == number and p["module"] == module]
                 for start in range(0, len(ids), limit):
                     steps.append(dict(index=len(steps)+1, module=module, parts=ids[start:start+limit]))
         scene = AssemblyScene(design_id=output.parent.name, vehicle=dict(make=request["brand"], model=request["model"]),
-            scale=request["scale"], specifications={}, target_ldu={}, parts=parts,
+            scale=request.get("scale") if request.get("scale") in {"1:38", "1:24", "1:16", "1:12"} else "1:24",
+            specifications={}, target_ldu={}, parts=parts,
             modules=[dict(id=m, recipe_version="multiview_v1") for m in sorted(module_ids.values())], steps=steps)
         output.parent.mkdir(parents=True, exist_ok=True)
         (output.parent / "scene.json").write_text(scene.model_dump_json(), encoding="utf-8")
         (output.parent / "model.mpd").write_text(ldraw(scene, True), encoding="utf-8")
         for view in ("front", "rear", "left", "right", "top", "bottom"):
-            render_scene(scene, output.parent / f"render_{view}.png", view)
-        instructions_pdf(scene, output.parent / "instructions.partial.pdf", {})
-        (output.parent / "instructions.partial.pdf").replace(output.parent / "instructions.pdf")
+            camera = {"front": "rear", "rear": "front"}.get(view, view)
+            rendered=scene
+            if view in {"left","right"}:
+                import numpy as np
+                rendered=scene.model_copy(deep=True)
+                yaw=np.array([[0,0,1],[0,1,0],[-1,0,0]])*(-1 if view=="left" else 1)
+                yaw[1,1]=1
+                for p in rendered.parts:
+                    p.transform.position=(yaw@np.array(p.transform.position)).tolist()
+                    p.transform.rotation=(yaw@np.array(p.transform.rotation).reshape(3,3)).ravel().tolist()
+                camera="left"
+            render_scene(rendered, output.parent / f"render_{view}.png", camera)
+        render_scene(scene, output.parent / "render_front_elevation.png", "left")
+        render_scene(scene, output.parent / "render_rear_elevation.png", "right")
+        cabin = scene.model_copy(deep=True)
+        hidden = {module_ids[name] for name in module_ids if any(word in name for word in ("roof", "windscreen", "glazing"))}
+        cabin.parts = [p for p in cabin.parts if p.module not in hidden]
+        render_scene(cabin, output.parent / "render_cabin.png", "rear")
+        if not args.renders_only:
+            instructions_pdf(scene, output.parent / "instructions.partial.pdf", {})
+            (output.parent / "instructions.partial.pdf").replace(output.parent / "instructions.pdf")
         result = dict(assembly_sha256=hashlib.sha256(args.input.read_bytes()).hexdigest(),
             part_count=len(parts), step_count=len(steps), insertion_paths_verified=False,
             files={p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in output.parent.iterdir()

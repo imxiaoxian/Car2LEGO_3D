@@ -69,11 +69,12 @@ def test_generic_brand_uses_catalog_name_and_dynamic_size(ready_research):
 
 
 @pytest.mark.parametrize("scale", ["1:38", "1:16", "1:12"])
-def test_unsupported_recipe_fails_before_pipeline(scale, tmp_path, ready_research):
+def test_legacy_scale_is_only_a_soft_hint(scale, tmp_path, ready_research):
     research, research_id = ready_research()
-    with patch("car2lego3d.web.subprocess.run") as run, pytest.raises(ValueError):
-        JobStore(tmp_path, research).start(request(scale=scale, research_id=research_id))
-    run.assert_not_called()
+    _, args, plan = prepare_request(request(scale=scale, research_id=research_id), research)
+    assert plan["generation"]["draft_recipe_available"]
+    assert plan["generation"]["config"]["proportion_mode"] == "visual"
+    assert "--scale" in args
 
 
 def test_no_static_f40_fallback(tmp_path, ready_research):

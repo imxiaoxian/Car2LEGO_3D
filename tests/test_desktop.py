@@ -42,6 +42,21 @@ def test_imported_completion_is_draft_without_embedded_acceptance_reference(stor
     assert scene["joints"] == []
 
 
+def test_zero_collisions_with_missing_colliders_is_not_a_pass(store):
+    desktop,id=store
+    assembly=desktop.artifacts(id) / "03-lego/assembly.json"
+    audit=dict(assembly_sha256=digest(assembly),collision_count=0,collision_coverage="partial",
+               connectivity=dict(status="passed"))
+    target=assembly.parent / "native-audit.json"
+    write_json(target,audit)
+    assert desktop.quality(id)["gates"]["collisions"]=="unverified"
+    audit["collision_coverage"]="complete"
+    write_json(target,audit)
+    assert desktop.quality(id)["gates"]["collisions"]=="passed"
+    assembly.write_text('{}',encoding="utf-8")
+    assert desktop.quality(id)["gates"]["collisions"]=="unverified"
+
+
 def test_specification_mapping_preserves_unknown_and_estimates():
     spec = read(ROOT / "data/vehicles/ferrari_f40_1987.json")
     spec["measurements"]["length"]["status"] = "estimated"
@@ -104,6 +119,7 @@ def test_submission_keeps_year_optional_and_customization_parent(store, monkeypa
     assert request["year"] is None and request["variant"] == ""
     assert request["parent_design_id"] == id
     assert request["custom_request"] == "black paint"
+    assert request["preferred_scale_denominator"] == 12
     with pytest.raises(RuntimeError):
         desktop.submit(dict(make="New Brand", model="Test"))
 
@@ -115,6 +131,50 @@ def test_invalid_photo_and_year_do_not_start_worker(store):
     with pytest.raises((ValueError, OSError)):
         desktop.submit({}, image=b"not an image")
     assert desktop.active is None
+
+
+def test_detail_reference_gallery_and_http_integrity(store):
+    from PIL import Image
+    desktop, id = store
+    directory = desktop.artifacts(id) / "01-image"
+    directory.mkdir()
+    Image.new("RGB", (64, 48), "red").save(directory / "front.png")
+    Image.new("RGB", (64, 48), "blue").save(directory / "cockpit.png")
+    manifest = directory / "views.json"
+    record = dict(file="cockpit.png", sha256=digest(directory / "cockpit.png"), model="gpt-image-test",
+                  purpose="Seat and dashboard evidence", modules=["interior"])
+    write_json(manifest, dict(views={"front": dict(file="front.png", sha256=digest(directory / "front.png"))},
+                             details={"cockpit": record}))
+    gallery = {image["view"]: image for image in desktop.detail(id)["reference_images"]}
+    assert gallery["cockpit"]["category"] == "detail"
+    assert gallery["cockpit"]["modules"] == ["interior"]
+    assert gallery["front"]["category"] == "exterior"
+    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(Handler, jobs=desktop.jobs, desktop=desktop,
+                                                        directory=str(ROOT / "frontend/public")))
+    thread = Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        connection = HTTPConnection("127.0.0.1", server.server_port)
+        url = gallery["cockpit"]["url"]
+        connection.request("GET", url)
+        response = connection.getresponse()
+        assert response.status == 200
+        assert response.read() == (directory / "cockpit.png").read_bytes()
+        (directory / "cockpit.png").write_bytes(b"changed")
+        connection.request("GET", url)
+        response = connection.getresponse()
+        assert response.status == 400
+        response.read()
+        record["file"] = "../outside.png"
+        write_json(manifest, dict(details={"cockpit": record}))
+        connection.request("GET", url)
+        response = connection.getresponse()
+        assert response.status == 400
+        response.read()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
 
 
 def test_compatibility_http_and_origin_guard(store, monkeypatch):
@@ -158,6 +218,10 @@ def test_worker_uses_four_views_and_reference_color_then_resumes_without_calls(t
     def command(job, arguments):
         args = [str(a) for a in arguments]
         commands.append(args)
+        if "optimize" in args:
+            output = Path(args[args.index("--assembly-directory")+1])
+            write_json(output/"quality-report.json", dict(status="not_accepted", delivery_accepted=False))
+            return
         output = Path(args[args.index("--output")+1])
         if "presentation" in args or "--assembly" in args:
             write_json(output, dict(assembly_sha256=digest(directory / "artifacts/03-lego/assembly.json")))
@@ -192,14 +256,18 @@ def test_worker_uses_four_views_and_reference_color_then_resumes_without_calls(t
     desktop.active = id
     desktop.run(id)
     assert desktop.state(id)["status"] == "draft", read(directory / "status.json")
-    assert len(commands) == 6
+    assert len(commands) == 7
     (directory / "artifacts/02-mesh/calibrated.glb").write_bytes(b"damaged mesh")
     desktop.active = id
     desktop.run(id)
     assert desktop.state(id)["status"] == "draft"
-    assert len(commands) == 9
-    assert all("image" not in args for args in commands[6:])
+    assert len(commands) == 8
+    assert all("image" not in args for args in commands[7:])
     desktop.active = id
     desktop.run(id)
     assert desktop.state(id)["status"] == "draft"
-    assert len(commands) == 9
+    assert len(commands) == 8
+    desktop.control(id, "retry", "roof")
+    desktop.worker.join(5)
+    assert desktop.state(id)["status"] == "draft"
+    assert all("image" not in args and "reconstruct" not in args for args in commands[8:])

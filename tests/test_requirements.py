@@ -29,7 +29,8 @@ def test_each_scale_has_its_own_grid_data_and_reference_requirements(scale, leng
     assert len(policy["required_measurements"]) == fields
     assert len(policy["reference_views"]) == views
     assert policy["max_parts_per_step"] == step_limit
-    assert plan["generation"]["draft_recipe_available"] == (scale == "1:24")
+    assert plan["generation"]["draft_recipe_available"]
+    assert plan["policy"]["required_mechanisms"] == {}
     assert not plan["generation"]["delivery_ready"]
 
 
@@ -50,17 +51,18 @@ def test_mechanisms_and_tolerances_increase_with_scale_without_mutable_policy_dr
         requirements_for_scale("1:8")
 
 
-def test_requested_scale_is_not_replaced_by_grid_quantization():
+def test_scale_hint_is_preserved_but_wheels_use_actual_selected_body_size():
     spec = load_spec(SPEC)
     fit = fit_mesh(trimesh.creation.box((16, 4, 2)), specifications=spec, scale="1:24")
     assert fit["length_studs"] == 23
-    assert fit["target_scale_denominator"] == 24
+    assert fit["nominal_scale_denominator"] == 24
+    assert fit["target_scale_denominator"] == pytest.approx(4430/184)
     dimensions = fit["physical_constraints"]
-    assert dimensions["scale_denominator"] == 24
-    assert dimensions["dimensions"]["length"]["target_mm"] == pytest.approx(4430/24)
+    assert dimensions["scale_denominator"] == pytest.approx(4430/184)
+    assert dimensions["dimensions"]["length"]["target_mm"] == pytest.approx(184)
     assert dimensions["dimensions"]["length"]["fitted_mm"] == 184
-    assert dimensions["dimensions"]["length"]["error_percent"] == pytest.approx(-.31602709)
-    assert dimensions["target_model_mm"]["wheelbase"] == pytest.approx(2450/24)
+    assert dimensions["dimensions"]["length"]["error_percent"] == pytest.approx(0)
+    assert dimensions["target_model_mm"]["wheelbase"] == pytest.approx(2450*184/4430)
     # Angles are never divided by the model scale.
     spec["measurements"]["windscreen_angle_to_horizontal"] = {
         "value": 35, "unit": "deg", "status": "estimated", "source": "ferrari_brochure"}
@@ -108,19 +110,12 @@ def test_snapshot_rejects_changed_vehicle_grid_or_policy():
 
 
 @pytest.mark.parametrize("scale", ["1:38", "1:16", "1:12"])
-def test_unimplemented_scale_saves_plan_before_any_model_invocation(tmp_path, monkeypatch, scale):
-    def unexpected(*args):
-        pytest.fail("Unsupported scales must not start model inference")
-    monkeypatch.setattr(cli, "invoke", unexpected)
-    monkeypatch.setattr(sys, "argv", ["car2lego3d", "run", "--prompt", "red car", "--scale", scale,
-                                     "--vehicle-specs", str(SPEC), "--output", str(tmp_path)])
-    with pytest.raises(SystemExit) as error:
-        cli.main()
-    assert error.value.code == 2
-    plan = json.loads((tmp_path / "00-requirements/requirements.json").read_text())
-    assert plan["policy"]["scale"] == scale
-    assert plan["generation"]["blockers"]
-    assert not (tmp_path / "01-image").exists()
+def test_legacy_scale_hints_adjust_to_native_envelope_instead_of_rejecting(scale):
+    fit = fit_mesh(trimesh.creation.box((16, 6, 2)), specifications=load_spec(SPEC), scale=scale)
+    assert 23 <= fit["length_studs"] <= 32
+    assert fit["width_studs"] in (8, 10, 12)
+    assert fit["visual_grid_adjustments"]["dimension_gate"] == "advisory"
+    assert design(fit).parts
 
 
 def test_scale_aware_steps_and_studio_preserve_geometry_and_report_draft(tmp_path):

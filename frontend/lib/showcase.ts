@@ -15,6 +15,9 @@ export const viewNames: Record<string, string> = {
   dashboard: "仪表台特写", door_hinges: "车门铰链与间隙", hood_hinges: "前后盖铰链与间隙",
   underbody: "底盘结构特写", rear_seats: "后排座舱", cargo_bay: "储物与检修空间",
   side_intakes: "侧进气口", lights: "灯组细节",
+  top: "整车俯视", front_right: "右前整车", rear_left: "左后整车", rear_right: "右后整车",
+  front_lights: "前灯与前脸", rear_lights: "尾灯与后脸", door_windows: "车门与侧窗",
+  windscreen_cowl: "前挡风与前围", rear_transition: "座舱与后盖过渡", wheel_arches: "轮毂与轮拱",
 };
 
 export const categoryNames: Record<string, string> = {

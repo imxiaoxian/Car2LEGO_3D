@@ -33,6 +33,10 @@ def main():
     studio.add_argument("--ldraw", type=Path, required=True)
     studio.add_argument("--output", type=Path, required=True)
     studio.add_argument("--thumbnail", type=Path)
+    optimize = commands.add_parser("optimize", help="Native module search and multi-view visual quality feedback")
+    optimize.add_argument("--assembly-directory", type=Path, required=True)
+    optimize.add_argument("--style-reference", type=Path)
+    optimize.add_argument("--iterations", type=int, default=16)
     measure = commands.add_parser("measure", help="Convert orthographic side-view annotations to physical priors")
     measure.add_argument("--vehicle-specs", type=Path, required=True)
     measure.add_argument("--annotations", type=Path, required=True)
@@ -69,8 +73,14 @@ def main():
             if name == "lego":
                 child.add_argument("--mesh", type=Path, required=True)
             size = child.add_mutually_exclusive_group()
-            size.add_argument("--length-studs", type=int, help="Custom nominal core length; default 24")
-            size.add_argument("--scale", choices=SCALES, help="Exact target scale; requires --vehicle-specs")
+            size.add_argument("--length-studs", type=int, help="Legacy core length hint; otherwise select automatically from appearance and parts")
+            size.add_argument("--scale", choices=SCALES, help="Legacy approximate size hint; visual fit may adjust dimensions")
+            child.add_argument("--style-reference", type=Path, help="Task-specific LEGO styling target")
+            for key, choices, default in (("proportion-mode", ["visual", "nominal"], "visual"),
+                ("function-profile", ["static"], "static"),
+                ("part-policy", ["library_first_custom_if_needed", "library_only"], "library_first_custom_if_needed"),
+                ("optimization-profile", ["quality", "draft"], "quality")):
+                child.add_argument("--"+key, choices=choices, default=default)
             child.add_argument("--strategy", choices=["plates", "car"], default="car")
             child.add_argument("--width-studs", type=int, choices=[8, 10, 12],
                                help="Body core width; spec mode selects the nearest family if omitted")
@@ -99,7 +109,11 @@ def main():
         parser.error("Spec-based run uses the calibrated X-long/Z-up frame; omit --up-axis and --yaw")
     if args.command == "run" and args.reference_image and not args.prompt:
         parser.error("--reference-image requires --prompt")
-    if args.command == "research":
+    if args.command == "optimize":
+        from .optimization import optimize_directory
+        print(json.dumps(optimize_directory(args.assembly_directory, args.style_reference,
+                         dict(max_quality_iterations=args.iterations)), ensure_ascii=False))
+    elif args.command == "research":
         from .research import research_vehicle
         result = research_vehicle({"brand": args.brand, "model": args.model, "variant": args.variant}, args.output)
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -163,7 +177,8 @@ def main():
             vehicle_spec = snapshot.resolve()
         spec_args = ["--vehicle-specs", vehicle_spec] if vehicle_spec is not None else []
         core_length = args.length_studs if args.length_studs is not None else 24
-        size_args = ["--scale", args.scale] if args.scale else ["--length-studs", core_length]
+        size_args = (["--scale", args.scale] if args.scale else
+                     ["--length-studs", args.length_studs] if args.length_studs is not None else [])
         with stage(args.output, "pipeline", {"mode": "prompt" if args.prompt else "views" if args.views else "image", "seed": args.seed,
                                              "backend": args.backend,
                                              "resolution": args.resolution,
@@ -218,7 +233,13 @@ def main():
                    *(["--width-studs", args.width_studs] if args.width_studs is not None else []),
                    *(["--body-style", args.body_style] if args.body_style else []),
                    *(["--reference-views", args.reference_views or source] if args.backend == "hunyuan-mv" or args.reference_views else []),
-                   *(["--requirements-snapshot", requirements_snapshot] if requirements_snapshot else []), *spec_args)
+                   *(["--requirements-snapshot", requirements_snapshot] if requirements_snapshot else []),
+                   *(["--style-reference", args.style_reference] if args.style_reference else []),
+                   "--proportion-mode", args.proportion_mode, "--function-profile", args.function_profile,
+                   "--part-policy", args.part_policy, "--optimization-profile", args.optimization_profile, *spec_args)
+            if args.optimization_profile == "quality":
+                invoke("optimize", "--assembly-directory", args.output/"03-lego",
+                       *(["--style-reference", args.style_reference] if args.style_reference else []))
             from .native import configured_preview
             native = configured_preview(args.output / "03-lego" / "model.ldr", args.output / "03-lego")
             record["native_preview"] = "03-lego/native-ldraw.png" if native else None
@@ -253,7 +274,10 @@ def main():
             print(convert_car(args.mesh, args.output, args.length_studs, args.up_axis, args.yaw,
                               args.color, not args.no_rear_wing, vehicle_spec, args.width_studs, args.scale,
                               json.loads(args.requirements_snapshot.read_text(encoding="utf-8"))
-                              if args.requirements_snapshot else None, args.body_style, args.reference_views))
+                              if args.requirements_snapshot else None, args.body_style, args.reference_views,
+                              generation_config=dict(proportion_mode=args.proportion_mode, function_profile=args.function_profile,
+                                  part_policy=args.part_policy, optimization_profile=args.optimization_profile),
+                              style_reference=args.style_reference))
         else:
             from .lego import convert
             print(convert(args.mesh, args.output, args.length_studs if args.length_studs is not None else 24,

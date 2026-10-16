@@ -9,6 +9,7 @@ import subprocess
 import sys
 
 from .common import ROOT, device_name, digest, model_lock, stage, write_json
+from .reference_plan import REFERENCE_GROUPS
 
 VIEWS = ("front", "left", "back", "right")
 
@@ -152,22 +153,49 @@ def load_views(path):
 
 def snapshot_views(source, directory):
     import shutil
-    manifest, paths = load_views(source)
+    manifest, groups = load_reference_images(source)
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     copied = {}
-    for name, origin in paths.items():
-        destination = directory / f"{name}.png"
-        shutil.copyfile(origin, destination)
-        copied[name] = {**manifest["views"][name], "file": destination.name}
+    for group, paths in groups.items():
+        copied[group] = {}
+        for name, origin in paths.items():
+            destination = directory / f"{name}.png"
+            shutil.copyfile(origin, destination)
+            copied[group][name] = {**manifest[group][name], "file": destination.name}
     anchor = Path(source).parent / "reference.png"
     if anchor.is_file():
         shutil.copyfile(anchor, directory / "reference.png")
     output = directory / "views.json"
-    write_json(output, {**manifest, "views": copied})
+    write_json(output, {**manifest, **copied})
     write_json(directory / "import.json", {"source_manifest": str(Path(source).resolve()),
                "source_sha256": digest(source), "imported": True, "new_image_api_calls": 0})
     return output
+
+
+def load_reference_images(path):
+    """Validate optional evidence independently of the model's four-camera input."""
+    import re
+    from PIL import Image
+    path = Path(path).resolve()
+    manifest, primary = load_views(path)
+    groups = {"views": primary}
+    names = set(primary)
+    for group in REFERENCE_GROUPS[1:]:
+        groups[group] = {}
+        for name, item in manifest.get(group, {}).items():
+            if not re.fullmatch(r"[a-z][a-z0-9_]*", name) or name in names:
+                raise ValueError("Reference labels must be unique safe identifiers")
+            names.add(name)
+            source = (path.parent / item["file"]).resolve()
+            if not source.is_relative_to(path.parent):
+                raise ValueError("Reference files must stay inside the manifest directory")
+            if digest(source) != item["sha256"]:
+                raise ValueError(f"Reference checksum mismatch: {name}")
+            with Image.open(source) as image:
+                image.verify()
+            groups[group][name] = source
+    return manifest, groups
 
 
 def reuse_reconstruction(source, directory, manifest_path, vehicle_spec, resolution, steps, seed):
@@ -175,9 +203,14 @@ def reuse_reconstruction(source, directory, manifest_path, vehicle_spec, resolut
     source, directory = Path(source).resolve(), Path(directory).resolve()
     manifest, _ = load_views(manifest_path)
     record = json.loads((source / "reconstruction.json").read_text(encoding="utf-8"))
-    expected = {"backend": "hunyuan-mv", "views": manifest["views"], "resolution": resolution,
+    expected = {"backend": "hunyuan-mv", "resolution": resolution,
                 "steps": steps, "seed": seed}
-    if record["status"] != "completed" or any(record["inputs"].get(k) != v for k, v in expected.items()):
+    cached_views = record.get("inputs", {}).get("views", {})
+    matching_images = (set(cached_views) == set(VIEWS) and
+                       all(cached_views[view].get("sha256") == manifest["views"][view]["sha256"]
+                           for view in VIEWS))
+    if (record["status"] != "completed" or not matching_images or
+            any(record["inputs"].get(k) != v for k, v in expected.items())):
         raise ValueError("Reconstruction cache does not match the requested views or inference settings.")
     for key in ("hunyuan3d_code", "hunyuan3d_weights"):
         if record["models"].get(key) != model_lock()[key]:

@@ -6,7 +6,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { RotateCcw, LoaderCircle, Eye, Layers } from "lucide-react";
 import { AssemblyScene, getAssemblyGeometry, getAssemblyScene } from "@/lib/api";
 
-const palette: Record<number, string> = { 0:"#17191a",4:"#c91a09",7:"#9ba19d",14:"#f2cd37",15:"#fafafa",25:"#fe8a18",36:"#c91a09",46:"#ff9d28",47:"#7c9daf",71:"#a0a5a9",72:"#6c6e68" };
+const palette: Record<number, string> = { 0:"#17191a",4:"#c91a09",7:"#9ba19d",14:"#f2cd37",15:"#fafafa",25:"#fe8a18",36:"#c91a09",40:"#292b2c",46:"#ff9d28",47:"#fcfcfc",71:"#a0a5a9",72:"#6c6e68" };
 const mechanismNames:Record<string,string>={rolling_wheels:"车轮滚动",front_hood:"前盖开合",engine_cover:"发动机盖开合",doors:"车门开合",steering:"前轮转向",independent_suspension:"独立悬挂"};
 function jointLabel(j:AssemblyScene["joints"][number]) {
   const location=j.id.startsWith("wheel_") ? `${j.id.includes("left") ? "左" : "右"}${j.id.includes("front") ? "前" : "后"}轮` : mechanismNames[j.capability] || "机构";
@@ -61,7 +61,7 @@ export default function AssemblyViewer({ id, highlightedModule = "" }: { id: str
           const c = g.color_id === 16 ? part.color_id : g.color_id;
           const transparent = (c >= 32 && c <= 47);
           const material = new THREE.MeshStandardMaterial({ color:palette[c] || "#b9b9b9", roughness:.3, metalness:c === 71 ? .18 : .03,
-            transparent, opacity:transparent ? .45 : 1, depthWrite:!transparent, side:THREE.DoubleSide });
+            transparent, opacity:transparent ? c === 40 ? .75 : .45 : 1, depthWrite:!transparent, side:THREE.DoubleSide });
           disposables.push(material); group.add(new THREE.Mesh(geometryCache.get(part.part_num)![index], material));
         });
         root.add(group);
@@ -71,7 +71,7 @@ export default function AssemblyViewer({ id, highlightedModule = "" }: { id: str
       reset.current = () => {
         const vertical=THREE.MathUtils.degToRad(camera.fov),horizontal=2*Math.atan(Math.tan(vertical/2)*camera.aspect);
         const distance=size.length()/2/Math.sin(Math.min(vertical,horizontal)/2)*1.08;
-        camera.position.copy(center).add(new THREE.Vector3(.9,.65,1.2).normalize().multiplyScalar(distance));
+        camera.position.copy(center).add(new THREE.Vector3(-.9,.65,1.2).normalize().multiplyScalar(distance));
         controls!.target.copy(center);controls!.update();
       };
       reset.current(); controls.minDistance = radius*.25; controls.maxDistance = radius*5;

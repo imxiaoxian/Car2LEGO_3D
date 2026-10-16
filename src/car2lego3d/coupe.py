@@ -93,6 +93,7 @@ def design_coupe(fit):
     cabin_width = fit.get("cabin_width_studs", 6)
     windscreen = fit.get("windscreen_part", "92583")
     glass_top = roof-2
+    fit["glass_top_plates"] = glass_top
     left = (width-cabin_width)//2
     sides = [left, left+cabin_width-1]
     cabin = range(left, left+cabin_width)

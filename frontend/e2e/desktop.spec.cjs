@@ -16,8 +16,8 @@ test('original creation, brand selection, optional year, and photo workflow', as
   await page.getByRole('button', { name: '其他，自定义品牌' }).click();
   await page.getByRole('textbox', { name: '自定义品牌名称' }).fill('测试品牌');
   await page.getByRole('textbox', { name: '车型', exact: true }).fill('Test');
-  await page.getByRole('combobox', { name: '模型比例' }).selectOption('1:24');
-  await expect(page.getByRole('region', { name: '比例设计要求' })).toContainText('1:24');
+  await expect(page.getByRole('combobox', { name: /比例/ })).toHaveCount(0);
+  await expect(page.getByRole('region', { name: '比例设计要求' })).toHaveCount(0);
   await page.screenshot({ path: info.outputPath('creation.png') });
   await page.getByRole('button', { name: '车辆照片', exact: true }).click();
   await page.getByLabel('上传车辆照片').setInputFiles(path.join(__dirname, '../public/images/ferrari-f40.webp'));
@@ -32,7 +32,8 @@ test('vehicle catalog filters and prepopulates creation', async ({ page }) => {
   await page.getByRole('combobox', { name: '筛选品牌' }).selectOption('BMW');
   await expect(page.getByRole('heading', { name: 'BMW M3 E30' })).toBeVisible();
   await expect(page.locator('.catalog-item')).toHaveCount(1);
-  await page.getByRole('link', { name: /创建 .* 设计/ }).click();
+  await expect(page.getByRole('combobox', { name: /比例/ })).toHaveCount(0);
+  await page.getByRole('link', { name: '创建设计', exact: true }).click();
   await expect(page.getByRole('textbox', { name: '车型', exact: true })).toHaveValue('M3 E30');
 });
 

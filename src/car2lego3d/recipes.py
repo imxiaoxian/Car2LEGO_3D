@@ -35,7 +35,7 @@ def classify(spec, brief=None, explicit=None):
         (r"hatchback|fiesta|mini cooper|掀背|两厢", "hatchback"),
         (r"sedan|saloon|轿车|三厢", "sedan"),
         (r"coupe|\bm4\b|轿跑", "coupe"),
-        (r"ferrari.*f40|sports.car|supercar|跑车", "sports_car"),
+        (r"ferrari.*f40|\bcountach\b|sports.car|supercar|跑车", "sports_car"),
     ]
     for pattern, family in rules:
         if re.search(pattern, identity):
@@ -72,6 +72,9 @@ def fit_family(fit, spec, brief=None, explicit=None):
         raise ValueError(f"Vehicle family {family} has no implemented recipe. Classification: {selection['source']}.")
     fit["recipe_selection"] = config
     if family == "sports_car":
+        from .wedge import fit_wedge, supports
+        if supports(spec):
+            return fit_wedge(fit, spec)
         fit["recipe"] = "sports-v1"
         return fit
     fit_suv(fit, spec) if family in ("suv", "crossover", "offroad") else fit_coupe(fit, spec)

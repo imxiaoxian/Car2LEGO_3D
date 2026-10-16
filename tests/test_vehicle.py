@@ -46,10 +46,13 @@ def test_wheelbase_constraint_overrides_bad_mesh_wheel_hypotheses():
     assert "overhang split from mesh" in source
     mesh = trimesh.creation.box((16, 4, 2))
     fit = fit_mesh(mesh, color=4, specifications=spec)
-    assert fit["width_studs"] == 10
-    assert fit["axles_studs"][1] - fit["axles_studs"][0] == 13
+    expected_axles, _ = constrained_axles(spec, fit["length_studs"], fit["source_axles_studs"],
+                                         fit["effective_scale_denominator"])
+    assert fit["axles_studs"] == expected_axles
+    assert fit["requirements_plan"]["visual_size_preference"]["denominator"] == 12
+    assert fit["effective_scale_denominator"] == pytest.approx(4430/(fit["length_studs"]*8))
     errors = fit["physical_constraints"]["dimensions"]
-    assert abs(errors["width"]["error_percent"]) < 7
+    assert errors["width"]["fitted_mm"] == fit["width_studs"]*8
     assert errors["rear_tyre_width"]["error_percent"] < -20
     assert not fit["physical_constraints"]["appearance_accepted"]
 

@@ -25,6 +25,16 @@ def main():
     request = json.loads(args.request.read_text(encoding="utf-8"))
     if not (args.candidate / "03-lego/model.ldr").is_file() or not (args.mesh / "calibrated.glb").is_file():
         raise ValueError("Candidate assembly and calibrated reconstruction are required")
+    assembly=args.candidate / "03-lego/assembly.json"
+    validation=json.loads((args.candidate / "03-lego/validation.json").read_text(encoding="utf-8"))
+    if validation.get("recipe", "").startswith("section-envelope"):
+        audit=json.loads((args.candidate / "03-lego/native-audit.json").read_text(encoding="utf-8"))
+        if (audit.get("assembly_sha256") != digest(assembly) or audit.get("collision_coverage") != "complete"
+                or audit.get("collision_count") != 0 or audit.get("connectivity",{}).get("status") != "passed"):
+            raise ValueError("Cannot publish a candidate with stale or failed native geometry checks")
+    presentation=args.candidate / "05-presentation/presentation.json"
+    if presentation.exists() and json.loads(presentation.read_text(encoding="utf-8")).get("assembly_sha256") != digest(assembly):
+        raise ValueError("Candidate instructions and renders belong to a different assembly")
     id = uuid4().hex
     directory = ROOT / "runs/web" / id
     artifacts = directory / "artifacts"

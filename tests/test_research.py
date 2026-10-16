@@ -36,7 +36,8 @@ def test_compilation_uses_live_evidence_and_preserves_unknowns():
     assert result["status"] == "ready"
     assert result["spec"]["measurements"]["door_length"]["value"] is None
     assert result["plans"]["1:24"]["generation"]["draft_recipe_available"]
-    assert not result["plans"]["1:16"]["generation"]["draft_recipe_available"]
+    assert result["plans"]["1:16"]["generation"]["draft_recipe_available"]
+    assert result["plans"]["1:16"]["soft_constraints"]
     assert "text" not in result["audit"]["opened_pages"][0]
     assert result["delivery_accepted"] is False
     answer["sources"][0]["kind"] = "reference"

@@ -4,11 +4,10 @@ import { Suspense, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowRight, Camera, ChevronRight, ImagePlus, LoaderCircle, X } from "lucide-react";
-import { createDesign, createDesignFromImage, getScales, ScaleCapability } from "@/lib/api";
+import { createDesign, createDesignFromImage } from "@/lib/api";
 import { showcaseCars } from "@/lib/showcase";
 import ProductImage from "@/components/ProductImage";
 import BrandSelector from "@/components/BrandSelector";
-import ScaleRequirements from "@/components/ScaleRequirements";
 import { findVehicleBrand } from "@/lib/vehicle-brands";
 
 export default function HomePage() {
@@ -22,8 +21,6 @@ function CreatePage() {
   const [customMake, setCustomMake] = useState(false);
   const [model, setModel] = useState("");
   const [year, setYear] = useState("");
-  const [scale, setScale] = useState("1:38");
-  const [scales, setScales] = useState<ScaleCapability[]>([]);
   const [mode, setMode] = useState<"text" | "photo">("text");
   const [photo, setPhoto] = useState<File | null>(null);
   const [preview, setPreview] = useState("");
@@ -43,12 +40,9 @@ function CreatePage() {
     const knownMake = findVehicleBrand(requestedMake);
     setMake(knownMake?.name || requestedMake); setCustomMake(Boolean(requestedMake && !knownMake));
     setModel(search.get("model") || ""); setYear(search.get("year") || "");
-    const requested = search.get("scale");
-    if (requested && ["1:38", "1:24", "1:16", "1:12"].includes(requested)) setScale(requested);
     const index = showcaseCars.findIndex(item => item.make.toLowerCase() === search.get("make")?.toLowerCase() && item.model.toLowerCase() === search.get("model")?.toLowerCase());
     if (index >= 0) setSelected(index);
   }, [search, router]);
-  useEffect(() => { void getScales().then(data => setScales(data.scales)).catch(() => setScales(["1:38", "1:24", "1:16", "1:12"].map(ratio => ({ ratio, mechanisms: [], status: "experimental", recipe_available: false, precision_supported: false })))); }, []);
   useEffect(() => {
     if (!photo) { setPreview(""); return; }
     const url = URL.createObjectURL(photo);
@@ -77,8 +71,8 @@ function CreatePage() {
     setLoading(true); setError("");
     try {
       const design = mode === "photo" && photo
-        ? await createDesignFromImage(photo, { make: make.trim(), model: model.trim(), year: year ? Number(year) : undefined, scale })
-        : await createDesign(make.trim(), model.trim(), year ? Number(year) : undefined, undefined, scale);
+        ? await createDesignFromImage(photo, { make: make.trim(), model: model.trim(), year: year ? Number(year) : undefined })
+        : await createDesign(make.trim(), model.trim(), year ? Number(year) : undefined);
       router.push(`/designs/${design.id}`);
     } catch (err) { setError(err instanceof Error ? err.message : "创建失败，请重试。"); setLoading(false); }
   }
@@ -101,8 +95,7 @@ function CreatePage() {
           <label className="field"><span>年款（选填）</span><input type="number" inputMode="numeric" min={1900} max={2030} value={year} onChange={e => setYear(e.target.value)} placeholder="例如 1990" disabled={loading} /></label>
           <button type="submit" className="button primary create-button" disabled={loading}>{loading ? <><LoaderCircle size={18} className="spin" />{mode === "photo" ? "识别中" : "创建中"}</> : <>创建设计 <ArrowRight size={17} /></>}</button>
         </div>
-        <div className="form-bottom"><label className="scale-field"><span>模型比例</span><select aria-label="模型比例" value={scale} disabled={loading} onChange={e => setScale(e.target.value)}>{scales.map(item => <option key={item.ratio} value={item.ratio}>{item.ratio} · {item.requirements?.label || "实验装配"}</option>)}</select></label><span>BrickLink Studio .io</span></div>
-        <ScaleRequirements policy={scales.find(item => item.ratio === scale)?.requirements} compact />
+        <div className="form-bottom"><span>BrickLink Studio .io</span></div>
         {error && <p role="alert" className="error-message">{error}</p>}
       </form>
     </section>

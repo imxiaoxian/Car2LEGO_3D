@@ -23,8 +23,10 @@ from PIL import Image, ImageOps
 from .common import ROOT, digest, write_json
 from .gpt_reference import configuration
 from .recipes import classify, selection_record
-from .requirements import SCALES, plan_design, requirements_for_scale
+from .requirements import SCALES, VISUAL_SIZE_HINT, plan_design, requirements_for_scale
 from .vehicle import tyre_diameter
+from .config import VERSION, options
+from .checkpoints import output_snapshot, stage_signature
 
 
 def read(path, fallback=None):
@@ -58,9 +60,11 @@ def ui_policy(scale):
 
 
 def physical(spec, request, applied=False, audit=None):
-    scale = request.get("scale", "1:38")
-    denominator = int(scale.split(":")[1])
+    scale = request.get("scale") or "auto"
+    denominator = int(scale.split(":")[1]) if scale in SCALES else None
     sources = spec.get("sources", {})
+    audit = audit or {}
+    dialogue = audit.get("mode") == "llm_dialogue" or spec.get("acquisition") == "vehicle-spec-dialogue-v1"
     measurements = {}
     for name, item in spec.get("measurements", {}).items():
         if item.get("value") is None:
@@ -71,8 +75,9 @@ def physical(spec, request, applied=False, audit=None):
         mm = value * 25.4 if item["unit"] == "inch" else value
         measurements[name] = dict(value=value, unit=item["unit"], method="sourced" if grounded else "estimated",
             grounded=grounded, conflicted=False, source_url=source.get("url"), source_kind=item.get("status"),
-            source_status="fetched", vehicle_match="source_scoped", confidence=1 if grounded else 0,
-            target_model_mm=mm / denominator if item["unit"] in {"mm", "inch"} else None,
+            source_status="model_provided" if dialogue else "fetched", vehicle_match="model_selected" if dialogue else "source_scoped",
+            confidence=item.get("confidence", 1 if grounded else 0),
+            target_model_mm=mm / denominator if denominator and item["unit"] in {"mm", "inch"} else None,
             evidence=item.get("evidence", ""), definition=name)
     for axle in ("front", "rear"):
         diameter = tyre_diameter(spec, axle)
@@ -80,10 +85,12 @@ def physical(spec, request, applied=False, audit=None):
             items = [measurements.get(f"{axle}_{field}", {}) for field in ("tyre_width", "tyre_aspect", "rim_diameter")]
             measurements[f"{axle}_tyre_diameter"] = dict(value=diameter, unit="mm", method="derived",
                 grounded=all(i.get("grounded", False) for i in items), conflicted=False,
-                target_model_mm=diameter / denominator, source_url=items[0].get("source_url"), evidence="Tyre specification conversion")
-    required = requirements_for_scale(scale)["required_measurements"]
+                target_model_mm=diameter / denominator if denominator else None, source_url=items[0].get("source_url"), evidence="Tyre specification conversion")
+    required = requirements_for_scale(scale if scale in SCALES else "1:12")["required_measurements"]
     missing = [n for n, item in spec.get("measurements", {}).items() if item.get("value") is None]
-    return dict(version="car2lego3d-physical-v1", vehicle=dict(make=request.get("brand", request.get("make", "")),
+    return dict(version="car2lego3d-physical-v2", selected_variant=spec.get("variant"),
+        acquisition_mode="llm_dialogue" if dialogue else "sourced", physical_measurement_verified=False,
+        vehicle=dict(make=request.get("brand", request.get("make", "")),
         model=request["model"], year=request.get("year")), scale=scale, applied_to_design=applied,
         overall_grounded=all(measurements.get(n, {}).get("grounded") for n in ("length", "width", "height", "wheelbase")),
         measurements=measurements, missing=missing, required_measurements=required, conflicts=[],
@@ -91,7 +98,9 @@ def physical(spec, request, applied=False, audit=None):
         sources=[dict(url=s.get("url", ""), title=s.get("title", ""), status="fetched",
             measurement_count=sum(m.get("source") == key for m in spec.get("measurements", {}).values()))
             for key, s in sources.items() if s.get("url")],
-        research=dict(skill="vehicle-spec-search", version="1", status="completed",
+        research=dict(skill="" if dialogue else "vehicle-spec-search", mode="llm_dialogue" if dialogue else "web_search",
+            model=audit.get("model") or sources.get("model", {}).get("model"), version=audit.get("version", "1"), status="completed",
+            dialogue_count=1 if dialogue else 0,
             documents_read=len((audit or {}).get("opened_pages", [])),
             queries=[dict(query=q["query"], purpose="vehicle specifications", status="searched", engine="Bing",
                 results=q.get("results", [])) for q in (audit or {}).get("calls", [])]))
@@ -154,8 +163,8 @@ class DesktopStore:
             raise ValueError("车型名称不能包含控制字符。")
         if not image and (not make.strip() or not model.strip()):
             raise ValueError("请选择品牌并填写车型。")
-        scale = payload.get("scale") or "1:38"
-        if scale not in SCALES:
+        scale = payload.get("scale") or "auto"
+        if scale not in (*SCALES, "auto"):
             raise ValueError("不支持的比例。")
         year = payload.get("year") or None
         if year is not None and (isinstance(year, bool) or not str(year).isdigit() or not 1900 <= int(year) <= 2030):
@@ -186,6 +195,9 @@ class DesktopStore:
             request = dict(brand=make.strip(), model=model.strip(), year=int(year) if year else None,
                 variant=str(year or ""), scale=scale, custom_request=custom, parent_design_id=parent,
                 color=payload.get("color"), seed=42, created_at=datetime.now(timezone.utc).isoformat())
+            request.update(generation_config=options({key: payload[key] for key in options() if key in payload}),
+                           sizing_mode="automatic_visual", preferred_scale_denominator=VISUAL_SIZE_HINT,
+                           pipeline_version=VERSION)
             write_json(directory / "request.json", request)
             write_json(directory / "status.json", dict(status="pending", stage="starting", progress=0, error=None))
             write_json(directory / "desktop.json", dict(artifacts="artifacts", workflow="multiview_v1"))
@@ -242,14 +254,14 @@ class DesktopStore:
                 write_json(spec_path, result["spec"])
                 write_json(directory / "research-audit.json", result.get("audit", {}))
             spec = read(spec_path)
-            plan = plan_design(spec, request["scale"])
+            plan = plan_design(spec, request.get("scale"))
             write_json(directory / "requirements.json", plan)
             if not plan["generation"]["draft_recipe_available"]:
                 raise ValueError("当前比例尚无可用装配配方：" + " ".join(plan["generation"]["blockers"]))
             spec_args = ["--vehicle-specs", str(spec_path)]
             prefix = [sys.executable, "-u", "-m", "car2lego3d"]
             views, mesh, lego, studio = (artifacts / n for n in ("01-image", "02-mesh", "03-lego", "04-studio"))
-            prompt = f"{request['brand']} {request['model']} {request.get('year') or ''}. {request.get('custom_request', '')}"
+            prompt = f"{request['brand']} {request['model']} {request.get('year') or ''}. Selected configuration: {spec['variant']}. {request.get('custom_request', '')}"
             if request.get("color") is not None:
                 prompt += f" LEGO body color ID {request['color']}."
             stages = [
@@ -258,12 +270,20 @@ class DesktopStore:
                 ("reconstruction", 45, mesh / "calibrated.glb", [*prefix, "reconstruct", "--views", views / "views.json",
                     "--output", mesh, "--backend", "hunyuan-mv", "--resolution", "256", "--reconstruction-steps", "50", *spec_args]),
                 ("assembly", 75, lego / "model.ldr", [*prefix, "lego", "--mesh", mesh / "calibrated.glb",
-                    "--output", lego, "--scale", request["scale"], "--reference-views", views / "views.json", *spec_args,
+                    "--output", lego, *(["--scale", request["scale"]] if request.get("scale") in SCALES else []),
+                    "--reference-views", views / "views.json", *spec_args,
                     *(["--color", request["color"]] if request.get("color") is not None else [])]),
+                ("optimization", 84, lego / "quality-report.json", [*prefix, "optimize", "--assembly-directory", lego]),
                 ("exporting", 90, studio / "model.io", [*prefix, "studio", "--ldraw", lego / "model.ldr", "--output", studio]),
             ]
+            generation = options(request.get("generation_config"))
+            for phase, _, _, command in stages:
+                if phase == "assembly":
+                    for key in ("proportion_mode", "function_profile", "part_policy", "optimization_profile"):
+                        command += ["--"+key.replace("_", "-"), generation[key]]
+            if generation["optimization_profile"] == "draft":
+                stages = [entry for entry in stages if entry[0] != "optimization"]
             done = read(directory / "checkpoints.json", {})
-            upstream_changed = False
             for stage, progress, output, command in stages:
                 self.checkpoint(id, stage, progress)
                 if stage == "assembly" and request.get("color") is None:
@@ -279,10 +299,18 @@ class DesktopStore:
                         color_record = dict(color=selected, image_sha256=image_hash, source="GPT reference appearance analysis")
                         write_json(color_path, color_record)
                     command += ["--color", color_record["color"]]
-                if upstream_changed or not (output.exists() and done.get(stage) == digest(output)):
+                signature = stage_signature(stage, command, directory, artifacts, spec_path, request, source)
+                checkpoint = done.get(stage)
+                valid = (output.exists() and isinstance(checkpoint, dict)
+                         and checkpoint.get("files") == output_snapshot(stage, output)
+                         and checkpoint.get("inputs") == signature)
+                if not valid:
                     self.command(id, command)
-                    upstream_changed = True
-                    done[stage] = digest(output)
+                    signature = stage_signature(stage, command, directory, artifacts, spec_path, request, source)
+                    done[stage] = dict(files=output_snapshot(stage, output), inputs=signature)
+                    if stage == "optimization" and isinstance(done.get("assembly"), dict):
+                        # Optimization replaces the assembly with its selected legal version.
+                        done["assembly"]["files"] = output_snapshot("assembly", lego/"model.ldr")
                     write_json(directory / "checkpoints.json", done)
                 if stage == "reference_images":
                     from .multiview import load_views
@@ -353,12 +381,14 @@ class DesktopStore:
                         old = self.artifacts(id)
                         revision = "revisions/" + uuid4().hex + "/artifacts"
                         target = self.directory(id) / revision
+                        previous = read(self.directory(id) / "checkpoints.json", {})
                         done = {}
                         for stage, folder, file in (("reference_images", "01-image", "views.json"),
                                                      ("reconstruction", "02-mesh", "calibrated.glb")):
                             if (old / folder / file).is_file():
                                 shutil.copytree(old / folder, target / folder)
-                                done[stage] = digest(target / folder / file)
+                                if isinstance(previous.get(stage), dict):
+                                    done[stage] = previous[stage]
                         write_json(self.directory(id) / "desktop.json", dict(artifacts=revision,
                             workflow="multiview_v1", retry_scope="full assembly", requested_module=module))
                         write_json(self.directory(id) / "checkpoints.json", done)
@@ -409,15 +439,18 @@ class DesktopStore:
             if rows:
                 files.update(xml=f"/api/v1/export/xml/{id}", quality=base+"/quality")
             manifest = read(artifacts / "01-image/views.json", {})
+            from .reference_plan import REFERENCE_GROUPS
             references = [dict(view="rear" if view == "back" else view, model=item.get("model", "unknown"),
-                url=base+"/reference-images/"+view, synthetic=True, category="exterior")
-                for view,item in manifest.get("views", {}).items()]
+                url=base+"/reference-images/"+view, synthetic=True,
+                category="detail" if group == "details" else "exterior", purpose=item.get("purpose"),
+                modules=item.get("modules", []))
+                for group in REFERENCE_GROUPS for view,item in manifest.get(group, {}).items()]
             image_record = read(artifacts / "01-image/image.json", {})
             if (artifacts / "01-image/reference.png").exists():
                 references.insert(0, dict(view="overview", model=image_record.get("model", "unknown"),
                     url=base+"/reference-images/overview", synthetic=True, category="exterior"))
             spec = read(directory / "vehicle-specs.json", {})
-            scale = request.get("scale", "1:38")
+            scale = request.get("scale") or "auto"
             car = dict(id=id, make=request["brand"], model=request["model"], year=request.get("year"),
                        created_at=request.get("created_at", datetime.fromtimestamp(directory.stat().st_ctime, timezone.utc).isoformat()))
             quality = self.quality(id) if rows else None
@@ -426,8 +459,10 @@ class DesktopStore:
             calls = Counter(read(artifacts / "01-image/car2lego/service-record.json", {}).get("calls", []))
             return dict(id=id, **{k:v for k,v in state.items() if k != "id"}, car=car, parts=parts,
                 parts_count=len(rows), created_at=car["created_at"], file_urls=files,
-                workflow_version="multiview_v1", requested_scale=scale,
-                scale_requirements=ui_policy(scale) | {"applied_to_design": bool(spec)},
+                workflow_version=VERSION, requested_scale=scale, sizing_mode=request.get("sizing_mode", "legacy"),
+                visual_size_preference=read(artifacts / "03-lego/fit.json", {}).get("requirements_plan", {}).get("visual_size_preference")
+                    or read(directory / "requirements.json", {}).get("visual_size_preference"),
+                scale_requirements=(ui_policy(scale) | {"applied_to_design": bool(spec)}) if scale in SCALES else None,
                 physical_specifications=physical(spec, request, bool(rows), read(directory / "research-audit.json", {})) if spec else None,
                 scene_url=base+"/scene" if rows else None,
                 assembly_preview_url=base+"/assembly-preview" if (artifacts / "03-lego/native-ldraw.png").exists() else None,
@@ -453,7 +488,9 @@ class DesktopStore:
         low, high = audit["bounds_ldu"]
         actual = {key: round((high[axis]-low[axis])*.4, 3) for key,axis in (("length",0), ("width",2), ("height",1))}
         spec = read(self.directory(id) / "vehicle-specs.json", {})
-        scale = read(self.directory(id) / "request.json")["scale"]
+        scale = read(self.directory(id) / "request.json").get("scale")
+        if scale not in SCALES:
+            return actual, {}
         deviations = {key: round((value/(spec["measurements"][key]["value"]/int(scale.split(":")[1]))-1)*100, 2)
                       for key,value in actual.items() if spec.get("measurements", {}).get(key, {}).get("value")}
         return actual, deviations
@@ -463,17 +500,29 @@ class DesktopStore:
         audit = self.native_audit(id)
         checks = report.get("dimension_checks", [])
         _, deviations = self.native_dimensions(id)
-        tolerances = requirements_for_scale(read(self.directory(id) / "request.json")["scale"])["dimension_tolerances_percent"]
+        request = read(self.directory(id) / "request.json")
+        visual = options(request.get("generation_config"))["proportion_mode"] == "visual"
+        scale = request.get("scale")
+        tolerances = requirements_for_scale(scale if scale in SCALES else "1:24")["dimension_tolerances_percent"]
         native_failures = [key for key,value in deviations.items() if abs(value) > tolerances[key]]
+        details = read(self.artifacts(id) / "03-lego/detail-report.json", {})
+        assembly = self.artifacts(id) / "03-lego/assembly.json"
+        if not assembly.exists() or details.get("assembly_sha256") != digest(assembly):
+            details = {}
         return dict(digital_status="draft", precision_verified=False,
             gates=dict(parts="unverified", connections=audit.get("connectivity", {}).get("status", "unverified"),
-                collisions=("passed" if audit["collision_count"] == 0 else "failed") if "collision_count" in audit else "unverified",
-                dimensions="failed" if native_failures or any(c["status"] == "out_of_tolerance" for c in checks) else "unverified",
-                appearance="unverified", mechanisms="unverified"),
+                collisions=("failed" if audit["collision_count"] else
+                    "passed" if audit.get("collision_coverage") == "complete" else "unverified") if "collision_count" in audit else "unverified",
+                dimensions="advisory" if visual else "failed" if native_failures or any(c["status"] == "out_of_tolerance" for c in checks) else "unverified",
+                appearance="unverified", mechanisms="unverified",
+                feature_retention="failed" if details.get("critical_unresolved_count") else "unverified"),
+            detail_preservation=details or None,
             studio=dict(status="unverified"), physical=dict(status="unverified"),
             issues=[dict(kind=f"{c['field']} 超出比例容差", parts=[], modules=["body_and_chassis"])
-                    for c in checks if c["status"] == "out_of_tolerance"] +
-                   [dict(kind=f"{key} 原生零件外包尺寸超差", parts=[], modules=["body_and_chassis"]) for key in native_failures])
+                    for c in checks if not visual and c["status"] == "out_of_tolerance"] +
+                   [dict(kind=f"{key} 原生零件外包尺寸超差", parts=[], modules=["body_and_chassis"]) for key in native_failures if not visual] +
+                   [dict(kind=f"{f['view']} / {f['description']}：细节尚未表达", parts=[], modules=["body_and_chassis"])
+                    for f in details.get("features", []) if f["status"] == "unresolved"])
 
     def export(self, id, kind):
         paths = {"io": "04-studio/model.io", "ldr": "03-lego/model.ldr", "csv": "03-lego/inventory.csv",
@@ -501,8 +550,10 @@ class DesktopStore:
 def dispatch_get(handler, path):
     store = handler.desktop
     if path == "/api/v1/designs/scales":
-        return handler.json_response(dict(default="1:38", scales=[dict(ratio=s, mechanisms=list(requirements_for_scale(s)["required_mechanisms"]),
-            status="experimental", recipe_available=s == "1:24", precision_supported=False, requirements=ui_policy(s)) for s in SCALES]))
+        return handler.json_response(dict(default="auto", selection_enabled=False, sizing_mode="automatic_visual",
+            preferred_scale_denominator=VISUAL_SIZE_HINT, detail_standard="1:12", exact_scale_required=False,
+            scales=[dict(ratio=s, mechanisms=[], status="legacy_hint", recipe_available=True,
+                         precision_supported=False, requirements=ui_policy(s)) for s in SCALES]))
     if path == "/api/v1/mods":
         return handler.json_response(read(ROOT / "data/ui/catalog.json")["mods"])
     if path in {"/api/v1/sets/vehicles", "/api/v1/sets", "/api/v1/sets/known-cars"}:
@@ -538,9 +589,19 @@ def dispatch_get(handler, path):
         return handler.send_file(store.artifacts(id) / f"05-presentation/render_{action.split('/')[-1]}.png")
     if action.startswith("reference-images/"):
         view = action.split("/")[-1]
-        if view not in {"overview", "front", "back", "left", "right"}:
+        directory = store.artifacts(id) / "01-image"
+        if view == "overview":
+            return handler.send_file(directory / "reference.png")
+        from .reference_plan import REFERENCE_GROUPS
+        manifest = read(directory / "views.json", {})
+        item = next((manifest.get(group, {}).get(view) for group in REFERENCE_GROUPS
+                     if view in manifest.get(group, {})), None)
+        if not item:
             raise FileNotFoundError()
-        return handler.send_file(store.artifacts(id) / "01-image" / ("reference.png" if view == "overview" else view + ".png"))
+        path = (directory / item["file"]).resolve()
+        if not path.is_relative_to(directory.resolve()) or digest(path) != item["sha256"]:
+            raise ValueError("Reference file path or hash mismatch")
+        return handler.send_file(path)
     raise FileNotFoundError()
 
 
@@ -588,7 +649,7 @@ def dispatch_post(handler, path):
             raise ValueError("请等待基础设计生成完成。")
         request = read(store.directory(id) / "request.json")
         result = store.submit(dict(make=request["brand"], model=request["model"], year=request.get("year"),
-            scale=payload.get("scale") or request["scale"],
+            scale="auto",
             customization_text=payload.get("customization_text", "")), parent=id)
         return handler.json_response(dict(id=result["id"], status=result["status"], parent_design_id=id, message="改装设计已创建"), 201)
     file = store.export(id, "io")

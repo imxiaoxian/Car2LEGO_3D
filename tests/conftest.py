@@ -1,8 +1,7 @@
 import pytest
 
 from car2lego3d.common import write_json
-from car2lego3d.research import ResearchStore, SKILL
-from car2lego3d.common import digest
+from car2lego3d.research import ResearchStore, DIALOGUE_VERSION
 from car2lego3d.vehicle import UNITS
 
 
@@ -25,7 +24,7 @@ def ready_research(tmp_path):
         research_id = "a" * 32
         write_json(directory / research_id / "research/spec.json", spec)
         write_json(directory / research_id / "result.json", {"status": "ready", "request": identity,
-                   "spec": spec, "audit": {"skill_sha256": digest(SKILL)}})
+                   "spec": spec, "audit": {"version": DIALOGUE_VERSION}})
         return store, research_id
 
     yield create
